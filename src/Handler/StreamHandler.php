@@ -105,8 +105,6 @@ final class StreamHandler
      */
     private const DEFAULT_IDLE_TIMEOUT_MS = 60000;
 
-    private array $lastHeaders = [];
-
     private ?\Throwable $onStatsException = null;
 
     private string $transportSharingMode;
@@ -234,11 +232,13 @@ final class StreamHandler
 
             $deadline = null;
             $stream = $this->createStream($request, $options, $body, $deadline);
+            $headers = \stream_get_meta_data($stream)['wrapper_data'];
 
             return $this->createResponse(
                 $request,
                 $options,
                 $stream,
+                \is_array($headers) ? $headers : [],
                 $startTime,
                 $deadline
             );
@@ -394,12 +394,10 @@ final class StreamHandler
         #[\SensitiveParameter]
         array $options,
         $stream,
+        array $hdrs,
         ?float $startTime,
         ?float $deadline
     ): PromiseInterface {
-        $hdrs = $this->lastHeaders;
-        $this->lastHeaders = [];
-
         try {
             [$ver, $status, $reason, $headers] = HeaderProcessor::parseHeaders($hdrs);
         } catch (\Throwable $e) {
@@ -1058,9 +1056,6 @@ final class StreamHandler
                 if (false === $resource) {
                     return false;
                 }
-
-                $headers = \stream_get_meta_data($resource)['wrapper_data'];
-                $this->lastHeaders = \is_array($headers) ? $headers : [];
 
                 // Arm reads with the idle timeout, replacing the context
                 // value the deadline may have tightened; -1 disables it.
