@@ -3481,6 +3481,52 @@ class ClientTest extends TestCase
     }
 
     /**
+     * @dataProvider failingGlobalMiddlewareProvider
+     */
+    public function testGlobalMiddlewareFailuresRejectThePromise(callable $middleware, \DomainException $failure, array $options): void
+    {
+        Client::pushGlobalMiddleware($middleware, 'failing');
+        $client = new Client(['handler' => new MockHandler([new Response()])]);
+
+        $promise = $client->requestAsync('POST', 'http://example.com', $options);
+
+        self::assertTrue(Is::rejected($promise));
+
+        try {
+            $promise->wait();
+            self::fail('Expected the middleware failure.');
+        } catch (\DomainException $e) {
+            self::assertSame($failure, $e);
+        }
+    }
+
+    public static function failingGlobalMiddlewareProvider(): iterable
+    {
+        $failure = new \DomainException('Middleware factory failure');
+        yield 'middleware factory' => [static function (callable $handler) use ($failure): callable {
+            throw $failure;
+        }, $failure, []];
+
+        $failure = new \DomainException('Middleware request failure');
+        yield 'middleware request' => [static function (callable $handler) use ($failure): callable {
+            return static function (RequestInterface $request, array $options) use ($failure): PromiseInterface {
+                throw $failure;
+            };
+        }, $failure, []];
+
+        $failure = new \DomainException('Replaced option failure');
+        yield 'replaced option failure' => [static function (callable $handler) use ($failure): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, $failure): PromiseInterface {
+                try {
+                    return $handler($request, $options);
+                } catch (InvalidArgumentException $e) {
+                    throw $failure;
+                }
+            };
+        }, $failure, ['form_params' => ['a' => 1], 'multipart' => []]];
+    }
+
+    /**
      * @dataProvider sendMethodProvider
      */
     public function testEverySendMethodRunsGlobalMiddleware(callable $send): void

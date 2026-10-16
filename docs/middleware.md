@@ -387,6 +387,8 @@ options such as `headers`, `query`, `body` and `json`. It receives the request
 and the request options merged with the client's default options, with null
 values removed, and must return a promise. The next handler throws, rather than
 returning a rejected promise, when the client cannot apply the request options.
+Other exceptions thrown by global middleware reject the returned promise, as
+they do in a handler stack.
 
 The first middleware pushed runs outermost, as with a handler stack. Pushing a
 name that is already registered replaces that middleware and moves it innermost.

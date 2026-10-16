@@ -706,7 +706,9 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      * receives the request and the request options merged with the client's
      * default options, with null values removed, and must return a promise. The
      * next handler throws, rather than returning a rejected promise, when the
-     * client cannot apply the request options.
+     * client cannot apply the request options. Other exceptions thrown by
+     * global middleware reject the returned promise, as they do in a handler
+     * stack.
      *
      * The first middleware pushed runs outermost, as with a handler stack.
      * Pushing a name that is already registered replaces that middleware and
@@ -1558,20 +1560,40 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
             return $this->transfer($request, $options);
         }
 
+        /** @var \Throwable|null $optionFailure Set by reference in the handler below. */
+        $optionFailure = null;
         $handler = function (
             #[\SensitiveParameter]
             RequestInterface $request,
             #[\SensitiveParameter]
             array $options
-        ): PromiseInterface {
-            return $this->transfer($request, $options);
+        ) use (&$optionFailure): PromiseInterface {
+            try {
+                return $this->transfer($request, $options);
+            } catch (\Throwable $e) {
+                // transfer() only throws when it cannot apply the request
+                // options. That error stays synchronous, as it is without
+                // global middleware.
+                $optionFailure = $e;
+
+                throw $e;
+            }
         };
 
-        foreach (\array_reverse(self::$globalMiddleware) as $middleware) {
-            $handler = $middleware($handler);
-        }
+        try {
+            foreach (\array_reverse(self::$globalMiddleware) as $middleware) {
+                $handler = $middleware($handler);
+            }
 
-        return $handler($request, $options);
+            return $handler($request, $options);
+        } catch (\Throwable $e) {
+            if ($e === $optionFailure) {
+                throw $e;
+            }
+
+            /** @var PromiseInterface<ResponseInterface, mixed> */
+            return P\Create::rejectionFor($e);
+        }
     }
 
     /**
