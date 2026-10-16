@@ -33,6 +33,11 @@ use Psr\Http\Message\ResponseInterface;
  * call from another coroutine throws a LogicException and leaves the handler
  * unchanged. Once the handler is idle, the next coroutine to use it becomes its
  * owner.
+ *
+ * When the promise task queue implements
+ * GuzzleHttp\Promise\ScopedTaskQueueInterface, the handler passes each pending
+ * transfer to the queue's track() method, so the queue can cancel transfers
+ * still pending when the scope that started them ends.
  */
 final class CurlMultiHandler
 {
@@ -411,6 +416,11 @@ final class CurlMultiHandler
             $this->addRequest($entry);
         } catch (\Throwable $e) {
             throw $this->discardPendingRequest($id, $entry, $e);
+        }
+
+        $queue = P\Utils::queue();
+        if ($queue instanceof P\ScopedTaskQueueInterface) {
+            $queue->track($promise);
         }
 
         return $promise;

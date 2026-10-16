@@ -4791,6 +4791,88 @@ class CurlMultiHandlerTest extends TestCase
         self::assertSame('next', (string) $response->getBody());
     }
 
+    public function testTracksEachPendingTransferWithAScopedTaskQueue(): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(), new Response()]);
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+
+        try {
+            $handler = new CurlMultiHandler();
+            $immediate = $handler(new Request('GET', Server::$url), []);
+            $delayed = $handler(new Request('GET', Server::$url), ['delay' => 1]);
+
+            self::assertSame([$immediate, $delayed], $tracked);
+
+            P\Utils::all([$immediate, $delayed])->wait();
+        } finally {
+            P\Utils::queue($queue);
+        }
+
+        self::assertCount(2, $tracked);
+    }
+
+    public function testDoesNotTrackATransferThatFailedToStart(): void
+    {
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+        $_SERVER['curl_multi_add_handle_result'] = \CURLM_INTERNAL_ERROR;
+
+        try {
+            (new CurlMultiHandler())(new Request('GET', Server::$url), []);
+            self::fail('Expected RequestException.');
+        } catch (RequestException $e) {
+            self::assertStringContainsString('Unable to add the cURL handle', $e->getMessage());
+        } finally {
+            P\Utils::queue($queue);
+        }
+
+        self::assertSame([], $tracked);
+    }
+
+    /**
+     * @param list<P\PromiseInterface> $tracked
+     */
+    private static function trackingTaskQueue(array &$tracked): P\ScopedTaskQueueInterface
+    {
+        return new class($tracked) implements P\ScopedTaskQueueInterface {
+            /** @var list<P\PromiseInterface> */
+            private $tracked;
+
+            /** @var P\TaskQueue */
+            private $queue;
+
+            public function __construct(array &$tracked)
+            {
+                $this->tracked = &$tracked;
+                $this->queue = new P\TaskQueue(false);
+            }
+
+            public function isEmpty(): bool
+            {
+                return $this->queue->isEmpty();
+            }
+
+            public function add(callable $task): void
+            {
+                $this->queue->add($task);
+            }
+
+            public function run(): void
+            {
+                $this->queue->run();
+            }
+
+            public function track(P\PromiseInterface $promise): void
+            {
+                $this->tracked[] = $promise;
+            }
+        };
+    }
+
     /**
      * Runs the callback in a coroutine scheduler with its own task queue. A
      * coroutine that drains the shared queue would also run tasks left by

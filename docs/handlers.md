@@ -204,6 +204,11 @@ call from another coroutine throws a `LogicException` and leaves the handler
 unchanged. Once the handler is idle, the next coroutine to use it becomes its
 owner.
 
+When the promise task queue implements
+`GuzzleHttp\Promise\ScopedTaskQueueInterface`, the handler passes each pending
+transfer to the queue's `track()` method, so the queue can cancel transfers
+still pending when the scope that started them ends.
+
 Synchronous requests sent through the default handler use `CurlHandler`, which
 has no owner, so one client can send them from many coroutines at once.
 Asynchronous requests, and every request on a client configured with
