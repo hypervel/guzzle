@@ -37,6 +37,11 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
     private array $config;
 
     /**
+     * @var array<string, callable(callable): callable> Global middleware, keyed by name
+     */
+    private static array $globalMiddleware = [];
+
+    /**
      * Clients accept an array of constructor parameters.
      *
      * Here's an example of creating a client using a base_uri and an array of
@@ -340,7 +345,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         // Merge the base URI into the request URI if needed.
         $options = $this->prepareDefaults($options);
 
-        return $this->transfer(
+        return $this->transferWithGlobalMiddleware(
             $request->withUri($this->buildUri($request->getUri(), $options), self::shouldPreserveHost($request)),
             $options
         );
@@ -573,7 +578,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         $request = $requestFactory->createRequest($method, $uri);
         $request = Psr7\Utils::modifyRequest($request, ['version' => $version]);
 
-        return $this->transfer($request, $options);
+        return $this->transferWithGlobalMiddleware($request, $options);
     }
 
     /**
@@ -689,6 +694,41 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         return $option === null
             ? $this->config
             : ($this->config[$option] ?? null);
+    }
+
+    /**
+     * Push a middleware onto the global middleware of every client.
+     *
+     * Global middleware has the same form as handler stack middleware. It wraps
+     * each transfer of every client, outside the client's handler stack and
+     * before the request options are applied to the request. It receives the
+     * request and the request options merged with the client's default options,
+     * with null values removed, and must return a promise. The next handler
+     * throws, rather than returning a rejected promise, when the client cannot
+     * apply the request options.
+     *
+     * The first middleware pushed runs outermost, as with a handler stack.
+     * Pushing a name that is already registered replaces that middleware and
+     * moves it innermost.
+     *
+     * Global middleware is shared by every client in the process, so register
+     * it once when the application starts rather than for each request.
+     *
+     * @param callable(callable): callable $middleware Middleware function
+     * @param string                       $name       Name to register for this middleware.
+     */
+    public static function pushGlobalMiddleware(callable $middleware, string $name): void
+    {
+        unset(self::$globalMiddleware[$name]);
+        self::$globalMiddleware[$name] = $middleware;
+    }
+
+    /**
+     * Remove a middleware from the global middleware by name.
+     */
+    public static function removeGlobalMiddleware(string $name): void
+    {
+        unset(self::$globalMiddleware[$name]);
     }
 
     private function buildUri(
@@ -1499,6 +1539,37 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
             DiagnosticValue::escape($option),
             $expected
         ));
+    }
+
+    /**
+     * Transfers the given request through the global middleware.
+     *
+     * @return PromiseInterface<ResponseInterface, mixed>
+     */
+    private function transferWithGlobalMiddleware(
+        #[\SensitiveParameter]
+        RequestInterface $request,
+        #[\SensitiveParameter]
+        array $options
+    ): PromiseInterface {
+        if (self::$globalMiddleware === []) {
+            return $this->transfer($request, $options);
+        }
+
+        $handler = function (
+            #[\SensitiveParameter]
+            RequestInterface $request,
+            #[\SensitiveParameter]
+            array $options
+        ): PromiseInterface {
+            return $this->transfer($request, $options);
+        };
+
+        foreach (\array_reverse(self::$globalMiddleware) as $middleware) {
+            $handler = $middleware($handler);
+        }
+
+        return $handler($request, $options);
     }
 
     /**
