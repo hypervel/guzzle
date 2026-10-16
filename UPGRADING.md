@@ -35,9 +35,9 @@ cancels them. See [Coroutine Ownership](docs/handlers.md#coroutine-ownership).
 #### Task Queues
 
 Promise callbacks settle promises in the coroutine that drains the task queue,
-so coroutine applications must assign a task queue with
-`GuzzleHttp\Promise\Utils::queue()` that keeps a separate queue for each
-coroutine. Hypervel installs one when it boots. See
+so coroutine applications must pass `GuzzleHttp\Promise\Utils::queue()` a task
+queue that keeps a separate queue for each coroutine. Hypervel installs one when
+it boots. See
 [Task Queue](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-api.md#task-queue).
 
 #### Idle cURL Handles
