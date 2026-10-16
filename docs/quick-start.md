@@ -135,13 +135,13 @@ $promise = $client->requestAsync('OPTIONS', 'http://httpbin.org/get');
 
 The promise returned by these methods is a
 `GuzzleHttp\Promise\PromiseInterface<Psr\Http\Message\ResponseInterface, mixed>`
-provided by the
-[Guzzle Promises library](https://github.com/guzzle/promises/blob/3.0/README.md).
-This means that you can chain `then()` calls off of the promise. These then
-calls are either fulfilled with a successful
-`Psr\Http\Message\ResponseInterface` or rejected with a reason. The reason is
-often an exception from Guzzle's exception hierarchy, but custom handlers can
-reject with other values.
+provided by
+[`hypervel/guzzle-promises`](https://github.com/hypervel/guzzle-promises/blob/3.0/README.md),
+Hypervel's fork of the Guzzle Promises library. This means that you can chain
+`then()` calls off of the promise. These then calls are either fulfilled with a
+successful `Psr\Http\Message\ResponseInterface` or rejected with a reason. The
+reason is often an exception from Guzzle's exception hierarchy, but custom
+handlers can reject with other values.
 
 ```php
 use Psr\Http\Message\ResponseInterface;

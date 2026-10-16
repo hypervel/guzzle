@@ -1,24 +1,24 @@
 # Package Ecosystem
 
-This page helps you choose between `guzzlehttp/guzzle` and related packages
-maintained by the Guzzle organization. Start with `guzzlehttp/guzzle` if you
-want to send HTTP requests; install another package directly only when your
+This page helps you choose between `hypervel/guzzle` and related packages, most
+of them maintained by the Guzzle organization. Start with `hypervel/guzzle` if
+you want to send HTTP requests; install another package directly only when your
 application needs that package's lower-level or specialized behavior.
 
 ## Core HTTP Client Stack
 
 | Package | Use it for | Documentation |
 |---------|------------|---------------|
-| `guzzlehttp/guzzle` | Sending synchronous and asynchronous HTTP requests. | [Quick Start](quick-start.md) |
+| `hypervel/guzzle` | Sending synchronous and asynchronous HTTP requests. | [Quick Start](quick-start.md) |
 | `guzzlehttp/psr7` | Creating and manipulating PSR-7 requests, responses, streams, and URIs. | [PSR-7 docs](https://github.com/guzzle/psr7/blob/3.1/docs/psr-7-messages.md) |
-| `guzzlehttp/promises` | Working directly with promises returned by asynchronous operations. | [Promises docs](https://github.com/guzzle/promises/blob/3.1/docs/promise-quick-start.md) |
+| `hypervel/guzzle-promises` | Working directly with promises returned by asynchronous operations. | [Promises docs](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-quick-start.md) |
 
-Install `guzzlehttp/guzzle` for normal application HTTP work. It already depends
-on `guzzlehttp/psr7` and `guzzlehttp/promises`, so you do not need to install
-them separately unless your application uses them directly.
+Install `hypervel/guzzle` for normal application HTTP work. It already depends
+on `guzzlehttp/psr7` and `hypervel/guzzle-promises`, so you do not need to
+install them separately unless your application uses them directly.
 
 Use `guzzlehttp/psr7` directly when you need message, stream, or URI objects
-without sending requests. Use `guzzlehttp/promises` directly when you need
+without sending requests. Use `hypervel/guzzle-promises` directly when you need
 promise composition outside of Guzzle's HTTP client APIs.
 
 ## Service Client Packages

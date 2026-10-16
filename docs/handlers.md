@@ -530,6 +530,15 @@ automatically driven by arbitrary event loops. A handler that resolves or
 rejects Guzzle promises from an external scheduler must ensure the Guzzle
 promise task queue is drained while that scheduler is running.
 
+> [!IMPORTANT]
+> In this fork, a pending promise belongs to the coroutine that created it, so a
+> handler must settle its promises, and run the task queue that runs their
+> callbacks, in that coroutine. The scheduler pattern below works when the
+> handler, its promises and the queue stay in one execution context, including
+> code outside Swoole coroutines. See
+> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-api.md#coroutine-ownership)
+> in `hypervel/guzzle-promises`.
+
 After resolving or rejecting a Guzzle promise from an external scheduler,
 schedule `GuzzleHttp\Promise\Utils::queue()->run()` on that scheduler soon,
 without blocking the scheduler.
