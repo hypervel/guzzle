@@ -103,7 +103,7 @@ custom handlers are responsible for honoring these options themselves.
 
 `max_idle_handles` (int|null): Maximum number of idle cURL easy handles retained
 by each default cURL handler. Accepts a non-negative integer or null. Zero
-disables idle handle retention; null or omission keeps the defaults of 3 for
+disables idle handle retention; null or omission keeps the defaults of 256 for
 `CurlHandler` and 50 for `CurlMultiHandler`. This setting does not affect the
 stream handler.
 

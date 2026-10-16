@@ -43,7 +43,7 @@ final class CurlHandler
      * - handle_factory: Optional curl factory used to create cURL handles.
      * - max_idle_handles: Optional maximum number of idle cURL easy handles.
      *   Accepts a non-negative integer or null. Zero disables idle handle
-     *   retention; null or omission keeps the default of 3.
+     *   retention; null or omission keeps the default of 256.
      * - transport_sharing: Optional transport sharing mode.
      *
      * @param array{handle_factory?: ?CurlFactoryInterface, max_idle_handles?: mixed, transport_sharing?: mixed} $options Array of options to use with the handler
@@ -56,7 +56,7 @@ final class CurlHandler
             }
         }
 
-        $maxIdleHandles = $options['max_idle_handles'] ?? 3;
+        $maxIdleHandles = $options['max_idle_handles'] ?? 256;
         if (!\is_int($maxIdleHandles) || $maxIdleHandles < 0) {
             throw new InvalidArgumentException('max_idle_handles must be a non-negative integer.');
         }

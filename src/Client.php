@@ -69,10 +69,10 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *   response streaming ("stream" => true) and does not limit overlapping
      *   buffered calls.
      * - max_idle_handles: (int|null) Maximum number of idle cURL easy handles
-     *   retained by each default cURL handler. Accepts a non-negative integer or
-     *   null. Zero disables idle handle retention; null or omission keeps the
-     *   defaults of 3 for CurlHandler and 50 for CurlMultiHandler. This setting
-     *   does not affect the stream handler.
+     *   retained by each default cURL handler. Accepts a non-negative integer
+     *   or null. Zero disables idle handle retention; null or omission keeps
+     *   the defaults of 256 for CurlHandler and 50 for CurlMultiHandler. This
+     *   setting does not affect the stream handler.
      * - max_total_connections: (int|null) Maximum concurrent connections
      *   overall, enforced by the default CurlMultiHandler. The default stream
      *   fallback receives the cap as a marker only: it rejects enabled

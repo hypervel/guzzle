@@ -81,6 +81,32 @@ class UtilsTest extends TestCase
         }
     }
 
+    public function testChooseHandlerKeepsDefaultIdleHandleLimits(): void
+    {
+        self::skipIfDefaultCurlMultiHandlerIsUnavailable();
+
+        $handler = Utils::chooseHandler();
+        $handlers = (new \ReflectionFunction($handler))->getStaticVariables();
+        if (isset($handlers['streaming'])) {
+            $handlers = (new \ReflectionFunction($handlers['default']))->getStaticVariables();
+        }
+
+        $maxHandles = static function ($curlHandler): int {
+            $factory = \Closure::bind(static function ($handler): CurlFactory {
+                return $handler->factory;
+            }, null, \get_class($curlHandler))($curlHandler);
+
+            return \Closure::bind(static function (CurlFactory $factory): int {
+                return $factory->maxHandles;
+            }, null, CurlFactory::class)($factory);
+        };
+
+        self::assertInstanceOf(CurlHandler::class, $handlers['sync']);
+        self::assertInstanceOf(CurlMultiHandler::class, $handlers['default']);
+        self::assertSame(256, $maxHandles($handlers['sync']));
+        self::assertSame(50, $maxHandles($handlers['default']));
+    }
+
     public function testChooseHandlerRejectsInvalidMaxIdleHandlesWithoutCurl(): void
     {
         $previousVersionInfo = self::setCurlVersionInfo(['version' => '7.29.0', 'features' => 0]);

@@ -209,10 +209,10 @@ class CurlHandlerTest extends TestCase
     public static function maxIdleHandlesProvider(): array
     {
         return [
-            'default' => [[], 3],
-            'null' => [['max_idle_handles' => null], 3],
+            'default' => [[], 256],
+            'null' => [['max_idle_handles' => null], 256],
             'disabled' => [['max_idle_handles' => 0], 0],
-            'increased' => [['max_idle_handles' => 4], 4],
+            'increased' => [['max_idle_handles' => 257], 257],
             'shared' => [['max_idle_handles' => 4, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 4],
         ];
     }
