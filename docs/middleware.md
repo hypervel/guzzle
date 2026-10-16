@@ -378,19 +378,20 @@ Client::pushGlobalMiddleware(function (callable $handler) {
         return $handler($request, $options);
     };
 }, 'request_source');
-
-Client::removeGlobalMiddleware('request_source');
 ```
 
 Global middleware has the same form as handler stack middleware. It wraps each
-transfer of every client, outside the client's handler stack and before the
-request options are applied to the request. It receives the request and the
-request options merged with the client's default options, with null values
-removed, and must return a promise. The next handler throws, rather than
+transfer of every client, outside the client's handler stack. The client has
+already resolved the request URI against `base_uri`, but has not applied request
+options such as `headers`, `query`, `body` and `json`. It receives the request
+and the request options merged with the client's default options, with null
+values removed, and must return a promise. The next handler throws, rather than
 returning a rejected promise, when the client cannot apply the request options.
 
 The first middleware pushed runs outermost, as with a handler stack. Pushing a
 name that is already registered replaces that middleware and moves it innermost.
+The middleware is called with the next handler for each transfer. Keep state
+shared across transfers outside that call.
 
 Global middleware is shared by every client in the process, so register it once
 when the application starts rather than for each request.
