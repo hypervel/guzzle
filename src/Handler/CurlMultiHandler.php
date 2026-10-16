@@ -371,33 +371,35 @@ final class CurlMultiHandler
                     $stalled = $this->multiExecDepth > 0
                         ? $this->failNestedWait($id, $waitToken)
                         : $this->executeUntil($id, $waitToken);
+
+                    // Settling can be queued, and guzzlehttp/promises drains
+                    // the queue before deciding a wait function achieved
+                    // nothing.
+                    P\Utils::queue()->run();
+
+                    // Never null: assigned below before any wait can invoke
+                    // this.
+                    /** @var Promise<ResponseInterface, mixed> $promise */
+                    if ($easy->deferredSettled || !P\Is::pending($promise)) {
+                        return;
+                    }
+
+                    // Neither path guarantees the transfer settled, and
+                    // returning while pending makes guzzlehttp/promises reject
+                    // with a bare string naming nothing.
+                    $message = \sprintf('Waiting on cURL multi handler transfer %d cannot make progress (%s).', $id, $stalled);
+
+                    // The entry is gone, so the easy handle is the only route
+                    // to a response that already arrived.
+                    $response = $easy->response;
+                    $failure = $response !== null
+                        ? new ResponseException($message, $easy->request, $response)
+                        : new RequestException($message, $easy->request);
+
+                    $promise->reject($failure);
                 } finally {
                     --$this->activeCalls;
                 }
-
-                // Settling can be queued, and guzzlehttp/promises drains the
-                // queue before deciding a wait function achieved nothing.
-                P\Utils::queue()->run();
-
-                // Never null: assigned below before any wait can invoke this.
-                /** @var Promise<ResponseInterface, mixed> $promise */
-                if ($easy->deferredSettled || !P\Is::pending($promise)) {
-                    return;
-                }
-
-                // Neither path guarantees the transfer settled, and returning
-                // while pending makes guzzlehttp/promises reject with a bare
-                // string naming nothing.
-                $message = \sprintf('Waiting on cURL multi handler transfer %d cannot make progress (%s).', $id, $stalled);
-
-                // The entry is gone, so the easy handle is the only route to
-                // a response that already arrived.
-                $response = $easy->response;
-                $failure = $response !== null
-                    ? new ResponseException($message, $easy->request, $response)
-                    : new RequestException($message, $easy->request);
-
-                $promise->reject($failure);
             },
             function () use ($id, $waitToken): void {
                 $this->claim('cancel');
