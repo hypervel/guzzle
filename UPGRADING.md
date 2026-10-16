@@ -20,9 +20,10 @@ of `guzzlehttp/promises`; also read its
 
 #### Multi Handler Ownership
 
-A `CurlMultiHandler` with pending work belongs to the coroutine driving it.
-Sending requests through it, ticking, running or closing it, or waiting on or
-canceling its transfers from another coroutine throws a `LogicException`.
+A `CurlMultiHandler` belongs to the coroutine driving it while it has pending
+work or a call is running. Sending requests through it, ticking, running or
+closing it, or waiting on or canceling its transfers from another coroutine
+throws a `LogicException`.
 
 These rules apply to requests that the default handler sends through
 `CurlMultiHandler`: asynchronous requests without `stream` enabled and, when the
