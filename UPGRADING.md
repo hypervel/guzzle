@@ -22,12 +22,15 @@ of `guzzlehttp/promises`; also read its
 
 A `CurlMultiHandler` with pending work belongs to the coroutine driving it.
 Sending requests through it, ticking, running or closing it, or waiting on or
-canceling its transfers from another coroutine throws a `LogicException`. Send
-asynchronous requests from one coroutine at a time, or give each coroutine its
-own client. Synchronous requests through the default handler use `CurlHandler`
-and are not affected, unless the client sets `max_host_connections` or
-`max_total_connections`. See
-[Coroutine Ownership](docs/handlers.md#coroutine-ownership).
+canceling its transfers from another coroutine throws a `LogicException`.
+
+These rules apply to requests that the default handler sends through
+`CurlMultiHandler`: asynchronous requests without `stream` enabled and, when the
+client sets `max_host_connections` or `max_total_connections`, synchronous ones
+as well. Send those from one coroutine at a time, or give each coroutine its own
+client. Wait on or cancel each transfer before its coroutine ends, unless the
+task queue implements `GuzzleHttp\Promise\ScopedTaskQueueInterface`, which
+cancels them. See [Coroutine Ownership](docs/handlers.md#coroutine-ownership).
 
 #### Task Queues
 

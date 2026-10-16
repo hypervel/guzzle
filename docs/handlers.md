@@ -209,12 +209,19 @@ When the promise task queue implements
 transfer to the queue's `track()` method, so the queue can cancel transfers
 still pending when the scope that started them ends.
 
-Synchronous requests sent through the default handler use `CurlHandler`, which
-has no owner, so one client can send them from many coroutines at once.
-Asynchronous requests, and every request on a client configured with
-`max_host_connections` or `max_total_connections`, use the client's
-`CurlMultiHandler`: send them from one coroutine at a time, or give each
-coroutine its own client.
+Without such a queue, a transfer still pending when its coroutine ends keeps the
+handler owned by that coroutine, so wait on or cancel every transfer before the
+coroutine ends.
+
+These rules apply only to requests handled by `CurlMultiHandler`. When cURL is
+available, the default handler uses it for asynchronous requests without
+`stream` enabled and, on a client configured with `max_host_connections` or
+`max_total_connections`, for synchronous requests without `stream` enabled as
+well. Send those requests from one coroutine at a time, or give each coroutine
+its own client. `CurlHandler` and `StreamHandler` have no owner, so one client
+can send its other requests from many coroutines at once. Requests with `stream`
+enabled use `StreamHandler`, which rejects them when connection caps are
+configured.
 
 ## Transport Sharing
 

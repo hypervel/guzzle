@@ -38,6 +38,10 @@ use Psr\Http\Message\ResponseInterface;
  * GuzzleHttp\Promise\ScopedTaskQueueInterface, the handler passes each pending
  * transfer to the queue's track() method, so the queue can cancel transfers
  * still pending when the scope that started them ends.
+ *
+ * Without such a queue, a transfer still pending when its coroutine ends keeps
+ * the handler owned by that coroutine, so wait on or cancel every transfer
+ * before the coroutine ends.
  */
 final class CurlMultiHandler
 {
