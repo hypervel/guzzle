@@ -194,6 +194,23 @@ try {
 }
 ```
 
+### Coroutine Ownership
+
+A `CurlMultiHandler` with pending work belongs to the Swoole coroutine that
+drives it, or to code running outside coroutines if it is driven there. While
+the handler has pending work or a call is running, only its owner may invoke it,
+call `tick()`, `execute()` or `close()`, or wait on or cancel its transfers. A
+call from another coroutine throws a `LogicException` and leaves the handler
+unchanged. Once the handler is idle, the next coroutine to use it becomes its
+owner.
+
+Synchronous requests sent through the default handler use `CurlHandler`, which
+has no owner, so one client can send them from many coroutines at once.
+Asynchronous requests, and every request on a client configured with
+`max_host_connections` or `max_total_connections`, use the client's
+`CurlMultiHandler`: send them from one coroutine at a time, or give each
+coroutine its own client.
+
 ## Transport Sharing
 
 By default, Guzzle does not ask handlers to share low-level transport state.

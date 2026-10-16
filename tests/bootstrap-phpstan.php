@@ -31,6 +31,18 @@ namespace {
     }
 }
 
+namespace Swoole {
+    if (!\class_exists(Coroutine::class)) {
+        class Coroutine
+        {
+            public static function getCid(): int
+            {
+                return -1;
+            }
+        }
+    }
+}
+
 namespace Openssl {
     if (!\class_exists(Session::class)) {
         class Session
