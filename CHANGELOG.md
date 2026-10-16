@@ -1,5 +1,9 @@
 # Change Log
 
+This is upstream's changelog for `guzzlehttp/guzzle`. Changes made in this fork
+are listed in its [GitHub releases](https://github.com/hypervel/guzzle/releases)
+and the README's [Hypervel Fork](README.md#hypervel-fork) section.
+
 Please refer to [UPGRADING](UPGRADING.md) guide for upgrading to a major version.
 
 

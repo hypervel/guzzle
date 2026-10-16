@@ -99,6 +99,43 @@ custom handlers are responsible for honoring these options themselves.
 > stripping that protects against credential leaks on redirects. See the
 > per-option notes under [Request Options](request-options.md) for specifics.
 
+### Idle cURL Handles
+
+`max_idle_handles` (int|null): Maximum number of idle cURL easy handles retained
+by each default cURL handler. Accepts a non-negative integer or null. Zero
+disables idle handle retention; null or omission keeps the defaults of 256 for
+`CurlHandler` and 50 for `CurlMultiHandler`. This setting does not affect the
+stream handler.
+
+Pass this option to the client constructor when Guzzle creates the default
+handler:
+
+```php
+use GuzzleHttp\Client;
+
+$client = new Client([
+    'max_idle_handles' => 64,
+]);
+```
+
+One value applies separately to each cURL handler Guzzle creates. In this
+example, both the synchronous and asynchronous handlers retain at most 64 idle
+easy handles each. Handles are created as requests need them, not allocated in
+advance.
+
+Keeping more idle easy handles can improve reuse after concurrent requests,
+particularly when a coroutine runtime allows synchronous requests to overlap. It
+also retains more native resources. This is not a limit on active requests or
+network connections: a synchronous easy handle can cache connections to several
+origins, and `CurlMultiHandler` has its own connection cache separate from its
+idle easy handles.
+
+The option is also accepted by `GuzzleHttp\Utils::chooseHandler()` and the
+`CurlHandler` and `CurlMultiHandler` constructors. A non-null value cannot be
+combined with a custom client handler or a custom `handle_factory`: configure
+the option on the custom handler's constructor, or retention on the custom
+factory, instead.
+
 ### Closing cURL Handlers
 
 The cURL handlers own native cURL resources. These resources are normally
@@ -156,6 +193,35 @@ try {
     // The handler was closed before this transfer completed.
 }
 ```
+
+### Coroutine Ownership
+
+A `CurlMultiHandler` with pending work belongs to the Swoole coroutine that
+drives it, or to code running outside coroutines if it is driven there. While
+the handler has pending work or a call is running, only its owner may invoke it,
+call `tick()`, `execute()` or `close()`, or wait on or cancel its transfers. A
+call from another coroutine throws a `LogicException` and leaves the handler
+unchanged. Once the handler is idle, the next coroutine to use it becomes its
+owner.
+
+When the promise task queue implements
+`GuzzleHttp\Promise\ScopedTaskQueueInterface`, the handler passes each pending
+transfer to the queue's `track()` method, so the queue can cancel transfers
+still pending when the scope that started them ends.
+
+Without such a queue, a transfer still pending when its coroutine ends keeps the
+handler owned by that coroutine, so wait on or cancel every transfer before the
+coroutine ends.
+
+These rules apply only to requests handled by `CurlMultiHandler`. When cURL is
+available, the default handler uses it for asynchronous requests without
+`stream` enabled and, on a client configured with `max_host_connections` or
+`max_total_connections`, for synchronous requests without `stream` enabled as
+well. Send those requests from one coroutine at a time, or give each coroutine
+its own client. `CurlHandler` and `StreamHandler` have no owner, so one client
+can send its other requests from many coroutines at once. Requests with `stream`
+enabled use `StreamHandler`, which rejects them when connection caps are
+configured.
 
 ## Transport Sharing
 
@@ -470,6 +536,15 @@ queue is drained automatically during synchronous `wait()`, but it is not
 automatically driven by arbitrary event loops. A handler that resolves or
 rejects Guzzle promises from an external scheduler must ensure the Guzzle
 promise task queue is drained while that scheduler is running.
+
+> [!IMPORTANT]
+> In this fork, a pending promise belongs to the coroutine that created it, so a
+> handler must settle its promises, and run the task queue that runs their
+> callbacks, in that coroutine. The scheduler pattern below works when the
+> handler, its promises and the queue stay in one execution context, including
+> code outside Swoole coroutines. See
+> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-api.md#coroutine-ownership)
+> in `hypervel/guzzle-promises`.
 
 After resolving or rejecting a Guzzle promise from an external scheduler,
 schedule `GuzzleHttp\Promise\Utils::queue()->run()` on that scheduler soon,

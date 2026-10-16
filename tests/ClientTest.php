@@ -38,6 +38,13 @@ use Psr\Http\Message\UriInterface;
 
 class ClientTest extends TestCase
 {
+    public function tearDown(): void
+    {
+        \Closure::bind(static function (): void {
+            self::$globalMiddleware = [];
+        }, null, Client::class)();
+    }
+
     public function testUsesDefaultHandler(): void
     {
         $client = new Client();
@@ -441,6 +448,29 @@ class ClientTest extends TestCase
             'handler' => new MockHandler(),
             $option => 1,
         ]);
+    }
+
+    public function testRejectsInvalidMaxIdleHandles(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
+
+        new Client(['max_idle_handles' => -1]);
+    }
+
+    public function testMaxIdleHandlesCannotBeUsedWithCustomHandler(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The "max_idle_handles" client option requires Guzzle to create the default handler. Configure the option on the CurlHandler or CurlMultiHandler constructor when providing a custom handler.');
+
+        new Client(['max_idle_handles' => 0, 'handler' => new MockHandler()]);
+    }
+
+    public function testNullMaxIdleHandlesCanBeUsedWithCustomHandler(): void
+    {
+        $client = new Client(['max_idle_handles' => null, 'handler' => new MockHandler()]);
+
+        self::assertArrayNotHasKey('max_idle_handles', $client->getConfig());
     }
 
     public function testNullConnectionCapClientOptionsCanBeUsedWithCustomHandler(): void
@@ -3353,6 +3383,199 @@ class ClientTest extends TestCase
         $client->request('GET', "http://e\u{200B}vil.test/", ['http_errors' => false]);
 
         self::assertSame("e\u{200B}vil.test", $mockHandler->getLastRequest()->getUri()->getHost());
+    }
+
+    public function testGlobalMiddlewareWrapsTheHandlerStackInPushOrder(): void
+    {
+        $calls = [];
+        $stack = HandlerStack::create(new MockHandler([new Response()]));
+        $stack->push(self::recordingMiddleware($calls, 'stack'));
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'first'), 'first');
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'second'), 'second');
+
+        (new Client(['handler' => $stack]))->request('GET', 'http://example.com');
+
+        self::assertSame(['first', 'second', 'stack'], $calls);
+    }
+
+    public function testPushingARegisteredGlobalMiddlewareNameReplacesItAndMovesItInnermost(): void
+    {
+        $calls = [];
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'replaced'), 'first');
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'second'), 'second');
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'first'), 'first');
+
+        (new Client(['handler' => new MockHandler([new Response()])]))->request('GET', 'http://example.com');
+
+        self::assertSame(['second', 'first'], $calls);
+    }
+
+    public function testRemovedGlobalMiddlewareNoLongerRuns(): void
+    {
+        $calls = [];
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'first'), 'first');
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'second'), 'second');
+        Client::removeGlobalMiddleware('first');
+        Client::removeGlobalMiddleware('missing');
+
+        (new Client(['handler' => new MockHandler([new Response()])]))->request('GET', 'http://example.com');
+
+        self::assertSame(['second'], $calls);
+    }
+
+    public function testGlobalMiddlewareReceivesTheRequestBeforeRequestOptionsAreApplied(): void
+    {
+        $received = [];
+        Client::pushGlobalMiddleware(static function (callable $handler) use (&$received): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, &$received): PromiseInterface {
+                $received = [$request, $options];
+
+                return $handler($request, $options);
+            };
+        }, 'inspect');
+        $mock = new MockHandler([new Response()]);
+        $client = new Client([
+            'handler' => $mock,
+            'base_uri' => 'http://example.com',
+            'headers' => ['X-Default' => 'client'],
+            'timeout' => 5,
+        ]);
+
+        $client->request('POST', '/path', ['json' => ['a' => 1], 'timeout' => null, 'connect_timeout' => 2]);
+
+        [$request, $options] = $received;
+        self::assertSame('http://example.com/path', (string) $request->getUri());
+        self::assertFalse($request->hasHeader('X-Default'));
+        self::assertSame('', (string) $request->getBody());
+        self::assertSame(['a' => 1], $options['json']);
+        self::assertSame(2, $options['connect_timeout']);
+        self::assertArrayNotHasKey('timeout', $options);
+        self::assertTrue($options[RequestOptions::SYNCHRONOUS]);
+        self::assertSame('client', $mock->getLastRequest()->getHeaderLine('X-Default'));
+        self::assertSame('{"a":1}', (string) $mock->getLastRequest()->getBody());
+    }
+
+    public function testGlobalMiddlewareSeesRequestOptionFailuresThrownByTheClient(): void
+    {
+        $caught = null;
+        Client::pushGlobalMiddleware(static function (callable $handler) use (&$caught): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, &$caught): PromiseInterface {
+                try {
+                    return $handler($request, $options);
+                } catch (\Throwable $e) {
+                    $caught = $e;
+
+                    throw $e;
+                }
+            };
+        }, 'catch');
+        $client = new Client(['handler' => new MockHandler([new Response()])]);
+
+        try {
+            $client->requestAsync('POST', 'http://example.com', ['form_params' => ['a' => 1], 'multipart' => []]);
+            self::fail('Expected InvalidArgumentException.');
+        } catch (InvalidArgumentException $e) {
+            self::assertStringContainsString('You cannot use form_params and multipart at the same time.', $e->getMessage());
+            self::assertSame($e, $caught);
+        }
+    }
+
+    /**
+     * @dataProvider failingGlobalMiddlewareProvider
+     */
+    public function testGlobalMiddlewareFailuresRejectThePromise(callable $middleware, \DomainException $failure, array $options): void
+    {
+        Client::pushGlobalMiddleware($middleware, 'failing');
+        $client = new Client(['handler' => new MockHandler([new Response()])]);
+
+        $promise = $client->requestAsync('POST', 'http://example.com', $options);
+
+        self::assertTrue(Is::rejected($promise));
+
+        try {
+            $promise->wait();
+            self::fail('Expected the middleware failure.');
+        } catch (\DomainException $e) {
+            self::assertSame($failure, $e);
+        }
+    }
+
+    public static function failingGlobalMiddlewareProvider(): iterable
+    {
+        $failure = new \DomainException('Middleware factory failure');
+        yield 'middleware factory' => [static function (callable $handler) use ($failure): callable {
+            throw $failure;
+        }, $failure, []];
+
+        $failure = new \DomainException('Middleware request failure');
+        yield 'middleware request' => [static function (callable $handler) use ($failure): callable {
+            return static function (RequestInterface $request, array $options) use ($failure): PromiseInterface {
+                throw $failure;
+            };
+        }, $failure, []];
+
+        $failure = new \DomainException('Replaced option failure');
+        yield 'replaced option failure' => [static function (callable $handler) use ($failure): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, $failure): PromiseInterface {
+                try {
+                    return $handler($request, $options);
+                } catch (InvalidArgumentException $e) {
+                    throw $failure;
+                }
+            };
+        }, $failure, ['form_params' => ['a' => 1], 'multipart' => []]];
+    }
+
+    /**
+     * @dataProvider sendMethodProvider
+     */
+    public function testEverySendMethodRunsGlobalMiddleware(callable $send): void
+    {
+        $calls = [];
+        Client::pushGlobalMiddleware(self::recordingMiddleware($calls, 'global'), 'global');
+        $client = new Client(['handler' => new MockHandler([new Response()])]);
+
+        self::assertSame(200, $send($client)->getStatusCode());
+        self::assertSame(['global'], $calls);
+    }
+
+    public static function sendMethodProvider(): iterable
+    {
+        yield 'send' => [static function (Client $client): ResponseInterface {
+            return $client->send(new Request('GET', 'http://example.com'));
+        }];
+        yield 'sendAsync' => [static function (Client $client): ResponseInterface {
+            return $client->sendAsync(new Request('GET', 'http://example.com'))->wait();
+        }];
+        yield 'sendRequest' => [static function (Client $client): ResponseInterface {
+            return $client->sendRequest(new Request('GET', 'http://example.com'));
+        }];
+        yield 'request' => [static function (Client $client): ResponseInterface {
+            return $client->request('GET', 'http://example.com');
+        }];
+        yield 'requestAsync' => [static function (Client $client): ResponseInterface {
+            return $client->requestAsync('GET', 'http://example.com')->wait();
+        }];
+        yield 'get' => [static function (Client $client): ResponseInterface {
+            return $client->get('http://example.com');
+        }];
+        yield 'getAsync' => [static function (Client $client): ResponseInterface {
+            return $client->getAsync('http://example.com')->wait();
+        }];
+    }
+
+    /**
+     * @param list<string> $calls
+     */
+    private static function recordingMiddleware(array &$calls, string $name): callable
+    {
+        return static function (callable $handler) use (&$calls, $name): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, &$calls, $name): PromiseInterface {
+                $calls[] = $name;
+
+                return $handler($request, $options);
+            };
+        };
     }
 
     private static function requestWithProtocolVersion(string $protocolVersion): RequestInterface

@@ -25,6 +25,23 @@ use Psr\Http\Message\ResponseInterface;
  * When using the CurlMultiHandler, custom curl options can be specified as an
  * associative array of curl option constants mapping to values in the
  * **curl** key of the provided request options.
+ *
+ * A CurlMultiHandler with pending work belongs to the Swoole coroutine that
+ * drives it, or to code running outside coroutines if it is driven there. While
+ * the handler has pending work or a call is running, only its owner may invoke
+ * it, call tick(), execute() or close(), or wait on or cancel its transfers. A
+ * call from another coroutine throws a LogicException and leaves the handler
+ * unchanged. Once the handler is idle, the next coroutine to use it becomes its
+ * owner.
+ *
+ * When the promise task queue implements
+ * GuzzleHttp\Promise\ScopedTaskQueueInterface, the handler passes each pending
+ * transfer to the queue's track() method, so the queue can cancel transfers
+ * still pending when the scope that started them ends.
+ *
+ * Without such a queue, a transfer still pending when its coroutine ends keeps
+ * the handler owned by that coroutine, so wait on or cancel every transfer
+ * before the coroutine ends.
  */
 final class CurlMultiHandler
 {
@@ -33,6 +50,7 @@ final class CurlMultiHandler
     private const KNOWN_CONSTRUCTOR_OPTIONS = [
         'handle_factory' => true,
         'max_host_connections' => true,
+        'max_idle_handles' => true,
         'max_total_connections' => true,
         'multiplex' => true,
         'options' => true,
@@ -154,10 +172,24 @@ final class CurlMultiHandler
      */
     private int $messageProcessingDepth = 0;
 
+    /** @var int|null Coroutine that drives the handler while it has work. */
+    private ?int $ownerCoroutine = null;
+
+    /**
+     * @var int Number of handler calls currently running. A call can yield
+     *          while the handler looks idle, such as while request preparation
+     *          reads the body or a queued task runs, so idle alone does not
+     *          free the handler.
+     */
+    private int $activeCalls = 0;
+
     /**
      * This handler accepts the following options:
      *
      * - handle_factory: An optional factory  used to create curl handles
+     * - max_idle_handles: Optional maximum number of idle cURL easy handles.
+     *   Accepts a non-negative integer or null. Zero disables idle handle
+     *   retention; null or omission keeps the default of 50.
      * - transport_sharing: Optional transport sharing mode.
      * - select_timeout: Optional timeout (in seconds) to block before timing
      *   out while selecting curl handles. Defaults to 1 second.
@@ -193,6 +225,14 @@ final class CurlMultiHandler
             // 7.16 or newer headers, and such builds compile out the matching
             // curl_multi_setopt() case, so the guarantee cannot be applied.
             throw new InvalidArgumentException('The "multiplex" CurlMultiHandler option requires CURLMOPT_PIPELINING, but it is not available in the installed PHP cURL extension.');
+        }
+
+        $maxIdleHandles = $options['max_idle_handles'] ?? 50;
+        if (!\is_int($maxIdleHandles) || $maxIdleHandles < 0) {
+            throw new InvalidArgumentException('max_idle_handles must be a non-negative integer.');
+        }
+        if (isset($options['max_idle_handles'], $options['handle_factory'])) {
+            throw new InvalidArgumentException('The "max_idle_handles" option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
         }
 
         CurlShareHandleState::assertNoRequiredSharingCustomFactoryConflict($options, 'CurlMultiHandler');
@@ -247,8 +287,8 @@ final class CurlMultiHandler
                 : null;
 
             $this->factory = $this->shareHandleState !== null
-                ? new CurlFactory(50, $this->shareHandleState->mode, $this->shareHandleState)
-                : new CurlFactory(50);
+                ? new CurlFactory($maxIdleHandles, $this->shareHandleState->mode, $this->shareHandleState)
+                : new CurlFactory($maxIdleHandles);
 
             $this->ownsFactory = true;
         }
@@ -274,6 +314,25 @@ final class CurlMultiHandler
      * @return PromiseInterface<ResponseInterface, mixed>
      */
     public function __invoke(
+        #[\SensitiveParameter]
+        RequestInterface $request,
+        #[\SensitiveParameter]
+        array $options
+    ): PromiseInterface {
+        $this->claim('__invoke');
+        ++$this->activeCalls;
+
+        try {
+            return $this->doInvoke($request, $options);
+        } finally {
+            --$this->activeCalls;
+        }
+    }
+
+    /**
+     * @return PromiseInterface<ResponseInterface, mixed>
+     */
+    private function doInvoke(
         #[\SensitiveParameter]
         RequestInterface $request,
         #[\SensitiveParameter]
@@ -306,39 +365,55 @@ final class CurlMultiHandler
         /** @var Promise<ResponseInterface, mixed> $promise */
         $promise = new Promise(
             function () use ($id, $waitToken, $easy, &$promise): void {
-                // Waiting cannot drive native cURL while a callback has the
-                // multi handle busy; fail the wait promptly instead of
-                // self-deadlocking.
-                $stalled = $this->multiExecDepth > 0
-                    ? $this->failNestedWait($id, $waitToken)
-                    : $this->executeUntil($id, $waitToken);
+                $this->claim('wait');
+                ++$this->activeCalls;
 
-                // Settling can be queued, and guzzlehttp/promises drains the
-                // queue before deciding a wait function achieved nothing.
-                P\Utils::queue()->run();
+                try {
+                    // Waiting cannot drive native cURL while a callback has
+                    // the multi handle busy; fail the wait promptly instead
+                    // of self-deadlocking.
+                    $stalled = $this->multiExecDepth > 0
+                        ? $this->failNestedWait($id, $waitToken)
+                        : $this->executeUntil($id, $waitToken);
 
-                // Never null: assigned below before any wait can invoke this.
-                /** @var Promise<ResponseInterface, mixed> $promise */
-                if ($easy->deferredSettled || !P\Is::pending($promise)) {
-                    return;
+                    // Settling can be queued, and guzzlehttp/promises drains
+                    // the queue before deciding a wait function achieved
+                    // nothing.
+                    P\Utils::queue()->run();
+
+                    // Never null: assigned below before any wait can invoke
+                    // this.
+                    /** @var Promise<ResponseInterface, mixed> $promise */
+                    if ($easy->deferredSettled || !P\Is::pending($promise)) {
+                        return;
+                    }
+
+                    // Neither path guarantees the transfer settled, and
+                    // returning while pending makes guzzlehttp/promises reject
+                    // with a bare string naming nothing.
+                    $message = \sprintf('Waiting on cURL multi handler transfer %d cannot make progress (%s).', $id, $stalled);
+
+                    // The entry is gone, so the easy handle is the only route
+                    // to a response that already arrived.
+                    $response = $easy->response;
+                    $failure = $response !== null
+                        ? new ResponseException($message, $easy->request, $response)
+                        : new RequestException($message, $easy->request);
+
+                    $promise->reject($failure);
+                } finally {
+                    --$this->activeCalls;
                 }
-
-                // Neither path guarantees the transfer settled, and returning
-                // while pending makes guzzlehttp/promises reject with a bare
-                // string naming nothing.
-                $message = \sprintf('Waiting on cURL multi handler transfer %d cannot make progress (%s).', $id, $stalled);
-
-                // The entry is gone, so the easy handle is the only route to
-                // a response that already arrived.
-                $response = $easy->response;
-                $failure = $response !== null
-                    ? new ResponseException($message, $easy->request, $response)
-                    : new RequestException($message, $easy->request);
-
-                $promise->reject($failure);
             },
             function () use ($id, $waitToken): void {
-                $this->cancel($id, $waitToken);
+                $this->claim('cancel');
+                ++$this->activeCalls;
+
+                try {
+                    $this->cancel($id, $waitToken);
+                } finally {
+                    --$this->activeCalls;
+                }
             }
         );
 
@@ -347,6 +422,11 @@ final class CurlMultiHandler
             $this->addRequest($entry);
         } catch (\Throwable $e) {
             throw $this->discardPendingRequest($id, $entry, $e);
+        }
+
+        $queue = P\Utils::queue();
+        if ($queue instanceof P\ScopedTaskQueueInterface) {
+            $queue->track($promise);
         }
 
         return $promise;
@@ -608,13 +688,7 @@ final class CurlMultiHandler
             return;
         }
 
-        if (
-            $this->handles === []
-            && 0 === $this->multiExecDepth
-            && 0 === $this->messageProcessingDepth
-            && $this->deferredCancels === []
-            && !$this->deferredClose
-        ) {
+        if ($this->isIdle()) {
             // Idle: hand the connection cache over by recreating the multi
             // handle. getMultiHandle() lazily re-initializes it (re-applying
             // the CURLMOPT_* options) on the next access.
@@ -747,7 +821,14 @@ final class CurlMultiHandler
      */
     public function tick(): void
     {
-        $this->tickFor(null, null);
+        $this->claim('tick');
+        ++$this->activeCalls;
+
+        try {
+            $this->tickFor(null, null);
+        } finally {
+            --$this->activeCalls;
+        }
     }
 
     /**
@@ -839,6 +920,13 @@ final class CurlMultiHandler
      */
     private function tickInQueue(): void
     {
+        // A tick queued by a coroutine that no longer owns the handler is
+        // stale: a throwing queued task can unwind the owner's tick() before
+        // this runs, and another coroutine can then claim the idle handler.
+        if ($this->ownerCoroutine !== \Swoole\Coroutine::getCid()) {
+            return;
+        }
+
         if ($this->multiExecDepth > 0) {
             // A cURL callback re-entered the handler while native execution
             // is running; the outer frame drives native cURL once it unwinds.
@@ -866,23 +954,30 @@ final class CurlMultiHandler
      */
     public function execute(): void
     {
-        $this->assertOpen();
+        $this->claim('execute');
+        ++$this->activeCalls;
 
-        if ($this->multiExecDepth > 0) {
-            // Native cURL cannot be driven while a callback has it busy, so
-            // the loop would spin without ever progressing.
-            throw new \LogicException('Cannot run the cURL multi event loop from inside a cURL callback; the callback must return before transfers can progress.');
-        }
+        try {
+            $this->assertOpen();
 
-        $queue = P\Utils::queue();
-
-        while (!$this->closed && !$this->closing && ($this->handles || !$queue->isEmpty())) {
-            // If there are no transfers, then sleep for the next delay,
-            // unless ready queue work could change what is pending.
-            if (!$this->active && $this->delays && $queue->isEmpty()) {
-                \usleep($this->timeToNext());
+            if ($this->multiExecDepth > 0) {
+                // Native cURL cannot be driven while a callback has it busy,
+                // so the loop would spin without ever progressing.
+                throw new \LogicException('Cannot run the cURL multi event loop from inside a cURL callback; the callback must return before transfers can progress.');
             }
-            $this->tick();
+
+            $queue = P\Utils::queue();
+
+            while (!$this->closed && !$this->closing && ($this->handles || !$queue->isEmpty())) {
+                // If there are no transfers, then sleep for the next delay,
+                // unless ready queue work could change what is pending.
+                if (!$this->active && $this->delays && $queue->isEmpty()) {
+                    \usleep($this->timeToNext());
+                }
+                $this->tick();
+            }
+        } finally {
+            --$this->activeCalls;
         }
     }
 
@@ -967,7 +1062,14 @@ final class CurlMultiHandler
      */
     public function close(): void
     {
-        $this->doClose(true);
+        $this->claim('close');
+        ++$this->activeCalls;
+
+        try {
+            $this->doClose(true);
+        } finally {
+            --$this->activeCalls;
+        }
     }
 
     private function assertOpen(): void
@@ -977,6 +1079,39 @@ final class CurlMultiHandler
             // intentionally a LogicException outside the GuzzleException hierarchy.
             throw new \BadMethodCallException('Cannot use the cURL multi handler after it has been closed.');
         }
+    }
+
+    /**
+     * Claims the handler for the current coroutine, which must already own it
+     * or find it idle with no call running.
+     */
+    private function claim(string $method): void
+    {
+        $coroutine = \Swoole\Coroutine::getCid();
+
+        if ($this->ownerCoroutine === $coroutine) {
+            return;
+        }
+
+        if ($this->activeCalls !== 0 || !$this->isIdle()) {
+            throw new \LogicException(\sprintf(
+                'Coroutine %d cannot call %s() on a cURL multi handler with work owned by coroutine %d. Finish the work in its owning coroutine first.',
+                $coroutine,
+                $method,
+                $this->ownerCoroutine
+            ));
+        }
+
+        $this->ownerCoroutine = $coroutine;
+    }
+
+    private function isIdle(): bool
+    {
+        return $this->handles === []
+            && 0 === $this->multiExecDepth
+            && 0 === $this->messageProcessingDepth
+            && $this->deferredCancels === []
+            && !$this->deferredClose;
     }
 
     private function doClose(bool $explicit): void

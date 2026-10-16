@@ -37,6 +37,11 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
     private array $config;
 
     /**
+     * @var array<string, callable(callable): callable> Global middleware, keyed by name
+     */
+    private static array $globalMiddleware = [];
+
+    /**
      * Clients accept an array of constructor parameters.
      *
      * Here's an example of creating a client using a base_uri and an array of
@@ -68,6 +73,11 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *   fallback receives the cap as a marker only: it rejects enabled
      *   response streaming ("stream" => true) and does not limit overlapping
      *   buffered calls.
+     * - max_idle_handles: (int|null) Maximum number of idle cURL easy handles
+     *   retained by each default cURL handler. Accepts a non-negative integer
+     *   or null. Zero disables idle handle retention; null or omission keeps
+     *   the defaults of 256 for CurlHandler and 50 for CurlMultiHandler. This
+     *   setting does not affect the stream handler.
      * - max_total_connections: (int|null) Maximum concurrent connections
      *   overall, enforced by the default CurlMultiHandler. The default stream
      *   fallback receives the cap as a marker only: it rejects enabled
@@ -84,6 +94,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *     base_uri?: string|UriInterface,
      *     transport_sharing?: string|null,
      *     max_host_connections?: int|null,
+     *     max_idle_handles?: int|null,
      *     max_total_connections?: int|null,
      *     allow_redirects?: bool|array{
      *         max?: int,
@@ -175,6 +186,9 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
             }
         }
 
+        $maxIdleHandles = $config['max_idle_handles'] ?? null;
+        unset($config['max_idle_handles']);
+
         // Deliberately not unset: the value also becomes the default
         // "multiplex" request option, which the configured handler accepts.
         $handlerMultiplex = ($config['multiplex'] ?? null) === Multiplexing::NONE;
@@ -184,6 +198,10 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         unset($config['transport_sharing']);
 
         if (!isset($config['handler'])) {
+            if ($maxIdleHandles !== null) {
+                $handlerOptions['max_idle_handles'] = $maxIdleHandles;
+            }
+
             if ($transportSharingMode !== TransportSharing::NONE) {
                 $handlerOptions['transport_sharing'] = $transportSharingMode;
             }
@@ -197,6 +215,8 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
                 : HandlerStack::create(Utils::chooseHandler($handlerOptions));
         } elseif (!\is_callable($config['handler'])) {
             throw new InvalidArgumentException('handler must be a callable');
+        } elseif ($maxIdleHandles !== null) {
+            throw new InvalidArgumentException('The "max_idle_handles" client option requires Guzzle to create the default handler. Configure the option on the CurlHandler or CurlMultiHandler constructor when providing a custom handler.');
         } elseif ($handlerOptions !== []) {
             throw new InvalidArgumentException('The "max_host_connections" and "max_total_connections" client options require Guzzle to create the default handler. Configure the options on the CurlMultiHandler constructor for numeric enforcement, or on the StreamHandler constructor to reject enabled response streaming, when providing a custom handler.');
         } elseif ($transportSharingMode === TransportSharing::HANDLER_REQUIRE) {
@@ -325,7 +345,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         // Merge the base URI into the request URI if needed.
         $options = $this->prepareDefaults($options);
 
-        return $this->transfer(
+        return $this->transferWithGlobalMiddleware(
             $request->withUri($this->buildUri($request->getUri(), $options), self::shouldPreserveHost($request)),
             $options
         );
@@ -558,7 +578,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         $request = $requestFactory->createRequest($method, $uri);
         $request = Psr7\Utils::modifyRequest($request, ['version' => $version]);
 
-        return $this->transfer($request, $options);
+        return $this->transferWithGlobalMiddleware($request, $options);
     }
 
     /**
@@ -674,6 +694,45 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         return $option === null
             ? $this->config
             : ($this->config[$option] ?? null);
+    }
+
+    /**
+     * Push a middleware onto the global middleware of every client.
+     *
+     * Global middleware has the same form as handler stack middleware. It wraps
+     * each transfer of every client, outside the client's handler stack. The
+     * client has already resolved the request URI against base_uri, but has not
+     * applied request options such as headers, query, body and json. It
+     * receives the request and the request options merged with the client's
+     * default options, with null values removed, and must return a promise. The
+     * next handler throws, rather than returning a rejected promise, when the
+     * client cannot apply the request options. Other exceptions thrown by
+     * global middleware reject the returned promise, as they do in a handler
+     * stack.
+     *
+     * The first middleware pushed runs outermost, as with a handler stack.
+     * Pushing a name that is already registered replaces that middleware and
+     * moves it innermost. The middleware is called with the next handler for
+     * each transfer. Keep state shared across transfers outside that call.
+     *
+     * Global middleware is shared by every client in the process, so register
+     * it once when the application starts rather than for each request.
+     *
+     * @param callable(callable): callable $middleware Middleware function
+     * @param string                       $name       Name to register for this middleware.
+     */
+    public static function pushGlobalMiddleware(callable $middleware, string $name): void
+    {
+        unset(self::$globalMiddleware[$name]);
+        self::$globalMiddleware[$name] = $middleware;
+    }
+
+    /**
+     * Remove a middleware from the global middleware by name.
+     */
+    public static function removeGlobalMiddleware(string $name): void
+    {
+        unset(self::$globalMiddleware[$name]);
     }
 
     private function buildUri(
@@ -1484,6 +1543,57 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
             DiagnosticValue::escape($option),
             $expected
         ));
+    }
+
+    /**
+     * Transfers the given request through the global middleware.
+     *
+     * @return PromiseInterface<ResponseInterface, mixed>
+     */
+    private function transferWithGlobalMiddleware(
+        #[\SensitiveParameter]
+        RequestInterface $request,
+        #[\SensitiveParameter]
+        array $options
+    ): PromiseInterface {
+        if (self::$globalMiddleware === []) {
+            return $this->transfer($request, $options);
+        }
+
+        /** @var \Throwable|null $optionFailure Set by reference in the handler below. */
+        $optionFailure = null;
+        $handler = function (
+            #[\SensitiveParameter]
+            RequestInterface $request,
+            #[\SensitiveParameter]
+            array $options
+        ) use (&$optionFailure): PromiseInterface {
+            try {
+                return $this->transfer($request, $options);
+            } catch (\Throwable $e) {
+                // transfer() only throws when it cannot apply the request
+                // options. That error stays synchronous, as it is without
+                // global middleware.
+                $optionFailure = $e;
+
+                throw $e;
+            }
+        };
+
+        try {
+            foreach (\array_reverse(self::$globalMiddleware) as $middleware) {
+                $handler = $middleware($handler);
+            }
+
+            return $handler($request, $options);
+        } catch (\Throwable $e) {
+            if ($e === $optionFailure) {
+                throw $e;
+            }
+
+            /** @var PromiseInterface<ResponseInterface, mixed> */
+            return P\Create::rejectionFor($e);
+        }
     }
 
     /**

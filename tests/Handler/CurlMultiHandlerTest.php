@@ -20,6 +20,7 @@ use GuzzleHttp\Handler\EasyHandle;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Multiplexing;
 use GuzzleHttp\Promise as P;
+use GuzzleHttp\Psr7;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\RequestOptions;
@@ -958,6 +959,69 @@ class CurlMultiHandlerTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('Invalid cURL multi option "not-a-curlmopt-option".');
         $a($request, []);
+    }
+
+    /**
+     * @dataProvider maxIdleHandlesProvider
+     */
+    public function testMaxIdleHandlesControlsRetention(array $options, int $expected): void
+    {
+        if (isset($options['transport_sharing'])) {
+            self::skipIfCurlShareIsUnavailable();
+        }
+
+        $handler = new CurlMultiHandler($options);
+        $factory = self::readFactory($handler);
+        $handles = [];
+        for ($i = 0; $i <= $expected; ++$i) {
+            $handles[] = $factory->create(new Request('GET', Server::$url), []);
+        }
+
+        foreach ($handles as $handle) {
+            $factory->release($handle);
+        }
+
+        self::assertCount($expected, self::readIdleHandles($factory));
+    }
+
+    public static function maxIdleHandlesProvider(): array
+    {
+        return [
+            'default' => [[], 50],
+            'null' => [['max_idle_handles' => null], 50],
+            'disabled' => [['max_idle_handles' => 0], 0],
+            'increased' => [['max_idle_handles' => 51], 51],
+            'shared' => [['max_idle_handles' => 51, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 51],
+        ];
+    }
+
+    /**
+     * @dataProvider invalidMaxIdleHandlesProvider
+     *
+     * @param mixed $value
+     */
+    public function testRejectsInvalidMaxIdleHandles($value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
+
+        new CurlMultiHandler(['max_idle_handles' => $value]);
+    }
+
+    public static function invalidMaxIdleHandlesProvider(): array
+    {
+        return [[-1], ['4']];
+    }
+
+    public function testMaxIdleHandlesCannotBeUsedWithCustomFactory(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The "max_idle_handles" option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
+
+        new CurlMultiHandler([
+            'max_idle_handles' => 0,
+            'handle_factory' => new CurlFactory(3),
+        ]);
     }
 
     public function testRejectsUnknownConstructorOption(): void
@@ -3717,6 +3781,8 @@ class CurlMultiHandlerTest extends TestCase
         self::initMultiHandle($handler);
         $mh = self::readMultiHandle($handler);
         self::setMultiProperty($handler, 'handles', [0 => ['busy']]);
+        // A handler with work belongs to the coroutine that added it.
+        self::setMultiProperty($handler, 'ownerCoroutine', \Swoole\Coroutine::getCid());
 
         $_SERVER['curl_setopt_fail'] = $option;
 
@@ -4143,6 +4209,15 @@ class CurlMultiHandlerTest extends TestCase
         return $hasMultiHandle($handler);
     }
 
+    private static function readIdleHandles(CurlFactory $factory): array
+    {
+        $readHandles = \Closure::bind(static function (CurlFactory $factory): array {
+            return $factory->handles;
+        }, null, CurlFactory::class);
+
+        return $readHandles($factory);
+    }
+
     private static function readFactory(CurlMultiHandler $handler): CurlFactory
     {
         $readFactory = \Closure::bind(static function (CurlMultiHandler $handler): CurlFactory {
@@ -4499,6 +4574,337 @@ class CurlMultiHandlerTest extends TestCase
 
         $handles = self::readMultiProperty($handler, 'handles');
         self::assertSame($entry['wait_token'], $handles[$id]['wait_token']);
+    }
+
+    /**
+     * @dataProvider foreignOperationProvider
+     */
+    public function testAnotherCoroutineCannotUseTheHandlerWhileItHasWork(callable $operation, string $message): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'owner')]);
+        $handler = new CurlMultiHandler();
+        $promise = $handler(new Request('GET', Server::$url), []);
+        $exception = null;
+
+        self::runInCoroutine(static function () use ($operation, $handler, $promise, &$exception): void {
+            try {
+                $operation($handler, $promise);
+            } catch (\LogicException $e) {
+                $exception = $e;
+            }
+        });
+
+        self::assertInstanceOf(\LogicException::class, $exception);
+        self::assertStringContainsString($message, $exception->getMessage());
+        self::assertSame('owner', (string) $promise->wait()->getBody());
+        self::assertCount(1, Server::received());
+    }
+
+    public static function foreignOperationProvider(): iterable
+    {
+        $handlerMessage = 'cannot call %s() on a cURL multi handler with work owned by coroutine -1. Finish the work in its owning coroutine first.';
+        $promiseMessage = 'cannot call %s() on an unfinished promise owned by coroutine -1.';
+
+        yield '__invoke' => [static function (CurlMultiHandler $handler): void {
+            $handler(new Request('GET', Server::$url), []);
+        }, \sprintf($handlerMessage, '__invoke')];
+        yield 'tick' => [static function (CurlMultiHandler $handler): void {
+            $handler->tick();
+        }, \sprintf($handlerMessage, 'tick')];
+        yield 'execute' => [static function (CurlMultiHandler $handler): void {
+            $handler->execute();
+        }, \sprintf($handlerMessage, 'execute')];
+        yield 'close' => [static function (CurlMultiHandler $handler): void {
+            $handler->close();
+        }, \sprintf($handlerMessage, 'close')];
+        yield 'wait' => [static function (CurlMultiHandler $handler, P\PromiseInterface $promise): void {
+            $promise->wait();
+        }, \sprintf($promiseMessage, 'wait')];
+        yield 'cancel' => [static function (CurlMultiHandler $handler, P\PromiseInterface $promise): void {
+            $promise->cancel();
+        }, \sprintf($promiseMessage, 'cancel')];
+    }
+
+    public function testRequestPreparationKeepsTheHandlerClaimed(): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'owner')]);
+        $handler = new CurlMultiHandler();
+        $response = null;
+        $exception = null;
+
+        self::runInCoroutine(static function () use ($handler, &$response, &$exception): void {
+            $body = Psr7\FnStream::decorate(Psr7\Utils::streamFor('body'), [
+                'getSize' => static function () use ($handler, &$exception): int {
+                    \Swoole\Coroutine::create(static function () use ($handler, &$exception): void {
+                        try {
+                            $handler(new Request('GET', Server::$url), []);
+                        } catch (\LogicException $e) {
+                            $exception = $e;
+                        }
+                    });
+
+                    return 4;
+                },
+            ]);
+
+            $response = $handler(new Request('POST', Server::$url, [], $body), [])->wait();
+        });
+
+        self::assertInstanceOf(\LogicException::class, $exception);
+        self::assertStringContainsString('cannot call __invoke() on a cURL multi handler with work owned by coroutine', $exception->getMessage());
+        self::assertSame('owner', (string) $response->getBody());
+        self::assertCount(1, Server::received());
+    }
+
+    /**
+     * @dataProvider runningCallProvider
+     */
+    public function testAnotherCoroutineCannotClaimTheIdleHandlerWhileACallIsRunning(callable $drive): void
+    {
+        $handler = new CurlMultiHandler();
+        $exception = null;
+
+        self::runInCoroutine(static function () use ($handler, $drive, &$exception): void {
+            $drive($handler, static function () use ($handler, &$exception): void {
+                \Swoole\Coroutine::create(static function () use ($handler, &$exception): void {
+                    try {
+                        $handler(new Request('GET', Server::$url), []);
+                    } catch (\LogicException $e) {
+                        $exception = $e;
+                    }
+                });
+            });
+        });
+
+        self::assertInstanceOf(\LogicException::class, $exception);
+        self::assertStringContainsString('cannot call __invoke() on a cURL multi handler with work owned by coroutine', $exception->getMessage());
+    }
+
+    public static function runningCallProvider(): iterable
+    {
+        yield 'tick' => [static function (CurlMultiHandler $handler, callable $interleave): void {
+            P\Utils::queue()->add($interleave);
+            $handler->tick();
+        }];
+        yield 'execute' => [static function (CurlMultiHandler $handler, callable $interleave): void {
+            P\Utils::queue()->add($interleave);
+            $handler->execute();
+        }];
+        yield 'wait' => [static function (CurlMultiHandler $handler, callable $interleave): void {
+            $promise = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+            P\Utils::queue()->add(static function () use ($promise, $interleave): void {
+                $promise->cancel();
+                $interleave();
+            });
+
+            try {
+                $promise->wait();
+                self::fail('Expected the canceled transfer to reject.');
+            } catch (P\CancellationException $e) {
+            }
+        }];
+    }
+
+    /**
+     * @dataProvider finishedWorkProvider
+     */
+    public function testAnotherCoroutineCanUseTheHandlerOnceItsWorkHasFinished(callable $finishWork, array $responses): void
+    {
+        Server::flush();
+        Server::enqueue($responses);
+        $handler = new CurlMultiHandler();
+        $response = null;
+
+        self::runInCoroutine(static function () use ($handler, $finishWork, &$response): void {
+            $finishWork($handler);
+
+            \Swoole\Coroutine::create(static function () use ($handler, &$response): void {
+                $response = $handler(new Request('GET', Server::$url), [])->wait();
+            });
+        });
+
+        self::assertSame('next', (string) $response->getBody());
+    }
+
+    public static function finishedWorkProvider(): iterable
+    {
+        yield 'completed' => [static function (CurlMultiHandler $handler): void {
+            self::assertSame('owner', (string) $handler(new Request('GET', Server::$url), [])->wait()->getBody());
+        }, [new Response(200, [], 'owner'), new Response(200, [], 'next')]];
+        yield 'canceled' => [static function (CurlMultiHandler $handler): void {
+            $handler(new Request('GET', Server::$url), ['delay' => 60000])->cancel();
+        }, [new Response(200, [], 'next')]];
+        yield 'failed preparation' => [static function (CurlMultiHandler $handler): void {
+            $failure = new \RuntimeException('Body failure');
+            $body = Psr7\FnStream::decorate(Psr7\Utils::streamFor('body'), [
+                'getSize' => static function () use ($failure): int {
+                    throw $failure;
+                },
+            ]);
+
+            try {
+                $handler(new Request('POST', Server::$url, [], $body), []);
+                self::fail('Expected the request preparation to fail.');
+            } catch (RequestException $e) {
+                self::assertSame($failure, $e->getPrevious());
+            }
+        }, [new Response(200, [], 'next')]];
+    }
+
+    public function testStaleQueuedTickDoesNotDriveAnotherCoroutinesTransfer(): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'next')]);
+        $handler = new CurlMultiHandler();
+        $failure = new \RuntimeException('Queued task failure');
+        $exception = null;
+        $active = null;
+        $response = null;
+
+        self::runInCoroutine(static function () use ($handler, $failure, &$exception, &$active, &$response): void {
+            P\Utils::queue()->add(static function () use ($failure): void {
+                throw $failure;
+            });
+
+            try {
+                $handler->tick();
+            } catch (\RuntimeException $e) {
+                $exception = $e;
+            }
+
+            $drained = new \Swoole\Coroutine\Channel(1);
+            \Swoole\Coroutine::create(static function () use ($handler, $drained, &$response): void {
+                $promise = $handler(new Request('GET', Server::$url), []);
+                $drained->pop();
+                $response = $promise->wait();
+            });
+
+            P\Utils::queue()->run();
+            $active = self::readMultiProperty($handler, 'active');
+            $drained->push(true);
+        });
+
+        self::assertSame($failure, $exception);
+        self::assertSame(0, $active);
+        self::assertSame('next', (string) $response->getBody());
+    }
+
+    public function testTracksEachPendingTransferWithAScopedTaskQueue(): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(), new Response()]);
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+
+        try {
+            $handler = new CurlMultiHandler();
+            $immediate = $handler(new Request('GET', Server::$url), []);
+            $delayed = $handler(new Request('GET', Server::$url), ['delay' => 1]);
+
+            self::assertSame([$immediate, $delayed], $tracked);
+
+            P\Utils::all([$immediate, $delayed])->wait();
+        } finally {
+            P\Utils::queue($queue);
+        }
+
+        self::assertCount(2, $tracked);
+    }
+
+    public function testDoesNotTrackATransferThatFailedToStart(): void
+    {
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+        $_SERVER['curl_multi_add_handle_result'] = \CURLM_INTERNAL_ERROR;
+
+        try {
+            (new CurlMultiHandler())(new Request('GET', Server::$url), []);
+            self::fail('Expected RequestException.');
+        } catch (RequestException $e) {
+            self::assertStringContainsString('Unable to add the cURL handle', $e->getMessage());
+        } finally {
+            P\Utils::queue($queue);
+        }
+
+        self::assertSame([], $tracked);
+    }
+
+    /**
+     * @param list<P\PromiseInterface> $tracked
+     */
+    private static function trackingTaskQueue(array &$tracked): P\ScopedTaskQueueInterface
+    {
+        return new class($tracked) implements P\ScopedTaskQueueInterface {
+            /** @var list<P\PromiseInterface> */
+            private $tracked;
+
+            /** @var P\TaskQueue */
+            private $queue;
+
+            public function __construct(array &$tracked)
+            {
+                $this->tracked = &$tracked;
+                $this->queue = new P\TaskQueue(false);
+            }
+
+            public function isEmpty(): bool
+            {
+                return $this->queue->isEmpty();
+            }
+
+            public function add(callable $task): void
+            {
+                $this->queue->add($task);
+            }
+
+            public function run(): void
+            {
+                $this->queue->run();
+            }
+
+            public function track(P\PromiseInterface $promise): void
+            {
+                $this->tracked[] = $promise;
+            }
+        };
+    }
+
+    /**
+     * Runs the callback in a coroutine scheduler with its own task queue. A
+     * coroutine that drains the shared queue would also run tasks left by
+     * other tests. The scheduler leaves Swoole's runtime hooks enabled, so they
+     * are restored for the tests that follow. Call the test server's control
+     * methods, such as Server::enqueue(), outside the callback: its client
+     * reuses cURL handles created without the hooks, which the hooked cURL
+     * functions reject.
+     */
+    private static function runInCoroutine(callable $callback): void
+    {
+        $queue = P\Utils::queue();
+        $hookFlags = \Swoole\Runtime::getHookFlags();
+        P\Utils::queue(new P\TaskQueue(false));
+        $failure = null;
+
+        try {
+            \Swoole\Coroutine\run(static function () use ($callback, &$failure): void {
+                try {
+                    $callback();
+                } catch (\Throwable $e) {
+                    $failure = $e;
+                }
+            });
+        } finally {
+            \Swoole\Runtime::setHookFlags($hookFlags);
+            P\Utils::queue($queue);
+        }
+
+        if ($failure !== null) {
+            throw $failure;
+        }
     }
 
     /**

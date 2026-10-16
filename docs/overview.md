@@ -2,7 +2,7 @@
 
 ## Requirements
 
-1.  PHP 7.4
+1.  PHP 8.4 or newer with the Swoole extension
 2.  To use the PHP stream handler, `allow_url_fopen` must be enabled in your
     system's php.ini.
 3.  To use the cURL handler, you must have cURL >= 7.34.0 compiled with OpenSSL
@@ -30,7 +30,7 @@ curl -sS https://getcomposer.org/installer | php
 You can add Guzzle as a dependency using Composer:
 
 ```bash
-composer require guzzlehttp/guzzle:^8.2
+composer require hypervel/guzzle:^8.2
 ```
 
 Alternatively, you can specify Guzzle as a dependency in your project's existing
@@ -39,7 +39,7 @@ composer.json file:
 ```js
 {
   "require": {
-     "guzzlehttp/guzzle": "^8.2"
+     "hypervel/guzzle": "^8.2"
   }
 }
 ```
@@ -66,9 +66,9 @@ what changed between the major versions.
 1.  Guzzle utilizes PSR-1, PSR-2, PSR-4, and PSR-7.
 2.  Guzzle is meant to be lean and fast with very few dependencies. This means
     that not every feature request will be accepted.
-3.  Guzzle has a minimum PHP version requirement of PHP 7.4. Pull requests must
-    not require a PHP version greater than PHP 7.4 unless the feature is only
-    utilized conditionally and the file can be parsed by PHP 7.4.
+3.  Guzzle's code uses PHP 7.4-compatible syntax so its static analysis tools
+    can run on PHP 7.4. At runtime, this fork requires PHP 8.4 or newer and the
+    Swoole extension.
 4.  All pull requests must include unit tests to ensure the change works as
     expected and to prevent regressions.
 
@@ -78,7 +78,7 @@ In order to contribute, you'll need to checkout the source from GitHub and
 install Guzzle's dependencies using Composer:
 
 ```bash
-git clone https://github.com/guzzle/guzzle.git
+git clone https://github.com/hypervel/guzzle.git
 cd guzzle && composer install
 ```
 
@@ -94,9 +94,9 @@ vendor/bin/phpunit
 
 ## Reporting a security vulnerability
 
-If you discover a security vulnerability within this package, please send an
-email to security@tidelift.com. All security vulnerabilities will be promptly
-addressed. Please do not disclose security-related issues publicly until a fix
-has been announced. Please see the
-[Security Policy](https://github.com/guzzle/guzzle/security/policy) for more
-information.
+If you discover a security vulnerability in this fork, please report it
+privately by emailing Albert Chen at
+[albert@hypervel.org](mailto:albert@hypervel.org). Please do not report security
+vulnerabilities through public GitHub issues or discussions. If it also affects
+`guzzlehttp/guzzle`, please report it upstream as well through their
+[Security Policy](https://github.com/guzzle/guzzle/security/policy).

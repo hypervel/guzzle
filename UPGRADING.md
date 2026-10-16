@@ -1,6 +1,52 @@
 Guzzle Upgrade Guide
 ====================
 
+guzzlehttp/guzzle to hypervel/guzzle
+------------------------------------
+
+`hypervel/guzzle` is Hypervel's fork of `guzzlehttp/guzzle` for Swoole
+coroutines. It keeps upstream's public API and replaces `guzzlehttp/guzzle` for
+packages with compatible version requirements. This section covers moving to the
+fork. The sections after it are upstream's upgrade notes for `guzzlehttp/guzzle`
+releases, and their PHP and dependency requirements describe upstream, not this
+fork.
+
+#### PHP Version and Dependencies
+
+This fork requires PHP 8.4 or newer and the Swoole extension. It requires
+`hypervel/guzzle-promises`, Hypervel's fork of `guzzlehttp/promises`, in place
+of `guzzlehttp/promises`; also read its
+[upgrade guide](https://github.com/hypervel/guzzle-promises/blob/3.0/UPGRADING.md).
+
+#### Multi Handler Ownership
+
+A `CurlMultiHandler` belongs to the coroutine driving it while it has pending
+work or a call is running. Sending requests through it, ticking, running or
+closing it, or waiting on or canceling its transfers from another coroutine
+throws a `LogicException`.
+
+These rules apply to requests that the default handler sends through
+`CurlMultiHandler`: asynchronous requests without `stream` enabled and, when the
+client sets `max_host_connections` or `max_total_connections`, synchronous ones
+as well. Send those from one coroutine at a time, or give each coroutine its own
+client. Wait on or cancel each transfer before its coroutine ends, unless the
+task queue implements `GuzzleHttp\Promise\ScopedTaskQueueInterface`, which
+cancels them. See [Coroutine Ownership](docs/handlers.md#coroutine-ownership).
+
+#### Task Queues
+
+Promise callbacks settle promises in the coroutine that drains the task queue,
+so coroutine applications must pass `GuzzleHttp\Promise\Utils::queue()` a task
+queue that keeps a separate queue for each coroutine. Hypervel installs one when
+it boots. See
+[Task Queue](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-api.md#task-queue).
+
+#### Idle cURL Handles
+
+`CurlHandler` keeps up to 256 idle easy handles by default instead of 3. Set the
+`max_idle_handles` client or handler option to keep fewer. See
+[Idle cURL Handles](docs/handlers.md#idle-curl-handles).
+
 7.0 to 8.0
 ----------
 

@@ -29,6 +29,8 @@ jobs:
 
       - name: Download dependencies
         run: composer update --no-interaction --no-progress
+        env:
+          COMPOSER_IGNORE_PLATFORM_REQ: php,ext-swoole
 
       - name: Download PHPStan
         run: composer bin phpstan update --no-interaction --no-progress
@@ -53,6 +55,8 @@ jobs:
 
       - name: Download dependencies
         run: composer update --no-interaction --no-progress
+        env:
+          COMPOSER_IGNORE_PLATFORM_REQ: php,ext-swoole
 
       - name: Download PHP CS Fixer
         run: composer bin php-cs-fixer update --no-interaction --no-progress
@@ -76,3 +80,5 @@ jobs:
 
       - name: Execute Composer Normalize
         run: make static-composer-normalize-check
+        env:
+          COMPOSER_IGNORE_PLATFORM_REQ: php,ext-swoole
