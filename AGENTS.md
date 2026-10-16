@@ -74,3 +74,54 @@
   between related functions, so apply the same edit to every copy. Only
   formatting and linking may differ, such as a docs link becoming a PHPDoc
   `@see` tag; the wording must never drift.
+
+## Hypervel Fork
+
+This repository is Hypervel's fork of `guzzlehttp/guzzle`. These rules apply on
+top of the guidelines above and take precedence where they differ. The fork
+sections of the README and `UPGRADING.md` describe the fork; the rest of
+`UPGRADING.md` and `CHANGELOG.md` are upstream's history.
+
+> [!WARNING]
+> Preserve upstream's public API for supported versions. Composer installs this
+> fork in place of `guzzlehttp/guzzle` for third-party packages and SDKs, so
+> existing calls and implementations must keep working unchanged. Do not break
+> existing public contracts or add required methods to existing interfaces. New
+> APIs must be backward compatible.
+
+- Keep fork changes minimal and in upstream's style so upstream updates merge
+  cleanly.
+- Land every change, including upstream syncs, through a pull request from a
+  work branch into the tracked branch. The checkout also has an `upstream`
+  remote, so target `hypervel/guzzle` explicitly in every `gh` command:
+  `--repo hypervel/guzzle`, or `repos/hypervel/guzzle/...` for `gh api`. Merge
+  with a merge commit, never a squash or rebase.
+- Split changes into coherent commits that stage whole files, each with a body
+  that explains what changed and why. Record the full reasoning in the pull
+  request.
+- Record fork-only changes in the pull request, the README's Hypervel Fork
+  section and the GitHub release notes, and document required migration steps in
+  the fork section of `UPGRADING.md`. `CHANGELOG.md` stays upstream's, which
+  overrides the changelog rule above for fork-only changes.
+- PHP 7.4 syntax is retained for the static tools; the fork's runtime
+  requirements are defined in `composer.json`. Run PHPUnit under PHP 8.4 or
+  newer with Swoole, as CI does in the `ghcr.io/hypervel/components-ci` image.
+  Run PHPStan and PHP-CS-Fixer under PHP 7.4 as above, setting
+  `COMPOSER_IGNORE_PLATFORM_REQ=php,ext-swoole` only when installing the root
+  package.
+- Regenerate `phpstan-baseline.neon` under PHP 7.4 with
+  `make static-phpstan-update-baseline`, using the same variable, whenever an
+  upstream merge conflicts in it.
+- Sync upstream on a work branch with `git merge upstream/<branch>`, never a
+  rebase, and keep the fork's intentional behavior when resolving conflicts.
+  When upstream merges a pull request the fork already carries, reconcile the
+  fork's copy with upstream's final version, keep the fork's own changes on top
+  of it, and remove only the code it supersedes. Before merging, run the fork's
+  checks and the affected Hypervel components test suites against the candidate
+  through temporary Composer path repositories.
+- Never fetch or push upstream tags: keep `remote.upstream.tagOpt` set to
+  `--no-tags`, and push only work branches and fork tags.
+- Tag a release after every merge that changes the fork. If the merge includes a
+  new upstream release, tag `<that release>.1` (for example `8.2.1.1`);
+  otherwise increase the last number (for example `8.2.0.1` to `8.2.0.2`). List
+  the included upstream pull requests in the GitHub release.
