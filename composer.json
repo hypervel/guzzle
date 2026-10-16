@@ -1,6 +1,6 @@
 {
-    "name": "guzzlehttp/guzzle",
-    "description": "Guzzle is a PHP HTTP client library",
+    "name": "hypervel/guzzle",
+    "description": "Hypervel's fork of Guzzle, a PHP HTTP client library",
     "license": "MIT",
     "keywords": [
         "framework",
@@ -51,10 +51,11 @@
         }
     ],
     "require": {
-        "php": "^7.4 || ^8.0",
+        "php": "^8.4",
         "ext-json": "*",
-        "guzzlehttp/promises": "^3.0.2",
+        "ext-swoole": "*",
         "guzzlehttp/psr7": "^3.1",
+        "hypervel/guzzle-promises": "^3.0.2",
         "psr/http-client": "^1.0",
         "psr/http-factory": "^1.0",
         "symfony/polyfill-php80": "^1.25",
@@ -68,6 +69,9 @@
         "php-http/message-factory": "^1.1",
         "phpunit/phpunit": "^9.6.34",
         "psr/log": "^1.1 || ^2.0 || ^3.0"
+    },
+    "replace": {
+        "guzzlehttp/guzzle": "self.version"
     },
     "provide": {
         "psr/http-client-implementation": "1.0"
