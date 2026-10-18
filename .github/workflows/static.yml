@@ -29,7 +29,7 @@ jobs:
         run: composer bin phpstan update --no-interaction --no-progress
 
       - name: Execute PHPStan
-        run: vendor/bin/phpstan analyze --no-progress
+        run: vendor/bin/phpstan analyze --no-progress --memory-limit=512M
 
   php-cs-fixer:
     name: PHP-CS-Fixer
