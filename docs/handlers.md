@@ -194,6 +194,34 @@ try {
 }
 ```
 
+### Coroutine Handlers
+
+`ContextualCurlMultiHandler` sends asynchronous requests through a cURL multi
+handler leased to the current Swoole coroutine while it has work.
+
+Idle handlers return to a bounded pool so later requests can reuse their
+connections. Concurrent coroutines use separate handlers; requests in the
+same coroutine share a handler while its transfers are active.
+
+The default client uses this handler for asynchronous cURL requests unless
+connection caps are configured. Synchronous requests still use `CurlHandler`.
+One client can serve concurrent coroutines; each promise must still be created
+and completed in its owning coroutine.
+
+`max_idle_multi_handlers` (int|null): Maximum number of idle cURL multi handlers
+retained for coroutine requests. Accepts a non-negative integer or null. Zero
+disables retention; null or omission keeps the default of 64. Cannot be combined
+with connection caps or a custom handler.
+
+```php
+$client = new \GuzzleHttp\Client(['max_idle_multi_handlers' => 16]);
+```
+
+This limits idle handlers, not active requests or connections. Each multi
+handler retains its own easy handles and connection cache. The separate
+`max_idle_handles` setting applies to each handler. Handlers running outside
+coroutines also return to the idle pool when their work finishes.
+
 ### Coroutine Ownership
 
 A `CurlMultiHandler` with pending work belongs to the Swoole coroutine that
@@ -205,23 +233,22 @@ unchanged. Once the handler is idle, the next coroutine to use it becomes its
 owner.
 
 When the promise task queue implements
-`GuzzleHttp\Promise\ScopedTaskQueueInterface`, the handler passes each pending
-transfer to the queue's `track()` method, so the queue can cancel transfers
-still pending when the scope that started them ends.
+`GuzzleHttp\Promise\ScopedTaskQueueInterface`, the handler tracks its pending
+native work through the queue's `track()` method. Canceling that work removes
+unfinished transfers, even if their response promises were settled directly.
+Cleanup errors are added to the queue; the scope must finish draining its queue
+after an error so other callbacks can complete.
 
-Without such a queue, a transfer still pending when its coroutine ends keeps the
-handler owned by that coroutine, so wait on or cancel every transfer before the
-coroutine ends.
+Without such a queue, a transfer still pending when its coroutine ends keeps an
+explicit or connection-capped multi handler owned by that coroutine, so wait on
+or cancel every transfer before the coroutine ends.
 
-These rules apply only to requests handled by `CurlMultiHandler`. When cURL is
-available, the default handler uses it for asynchronous requests without
-`stream` enabled and, on a client configured with `max_host_connections` or
-`max_total_connections`, for synchronous requests without `stream` enabled as
-well. Send those requests from one coroutine at a time, or give each coroutine
-its own client. `CurlHandler` and `StreamHandler` have no owner, so one client
-can send its other requests from many coroutines at once. Requests with `stream`
-enabled use `StreamHandler`, which rejects them when connection caps are
-configured.
+The default coroutine handler manages these ownership rules for you. An
+explicit `CurlMultiHandler`, or a client configured with
+`max_host_connections` or `max_total_connections`, must still be driven from
+one coroutine at a time. Capped clients keep one multi handler so the limits
+apply across all their requests. Requests with `stream` enabled use
+`StreamHandler`, which rejects them when connection caps are configured.
 
 ## Transport Sharing
 
@@ -543,7 +570,7 @@ promise task queue is drained while that scheduler is running.
 > callbacks, in that coroutine. The scheduler pattern below works when the
 > handler, its promises and the queue stay in one execution context, including
 > code outside Swoole coroutines. See
-> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.0/docs/promise-api.md#coroutine-ownership)
+> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.1/docs/promise-api.md#coroutine-ownership)
 > in `hypervel/guzzle-promises`.
 
 After resolving or rejecting a Guzzle promise from an external scheduler,

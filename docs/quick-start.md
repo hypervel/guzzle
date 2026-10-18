@@ -136,7 +136,7 @@ $promise = $client->requestAsync('OPTIONS', 'http://httpbin.org/get');
 The promise returned by these methods is a
 `GuzzleHttp\Promise\PromiseInterface<Psr\Http\Message\ResponseInterface, mixed>`
 provided by
-[`hypervel/guzzle-promises`](https://github.com/hypervel/guzzle-promises/blob/3.0/README.md),
+[`hypervel/guzzle-promises`](https://github.com/hypervel/guzzle-promises/blob/3.1/README.md),
 Hypervel's fork of the Guzzle Promises library. This means that you can chain
 `then()` calls off of the promise. These then calls are either fulfilled with a
 successful `Psr\Http\Message\ResponseInterface` or rejected with a reason. The
