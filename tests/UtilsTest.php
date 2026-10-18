@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GuzzleHttp\Tests;
 
 use GuzzleHttp\Exception\InvalidArgumentException;
+use GuzzleHttp\Handler\ContextualCurlMultiHandler;
 use GuzzleHttp\Handler\CurlFactory;
 use GuzzleHttp\Handler\CurlHandler;
 use GuzzleHttp\Handler\CurlMultiHandler;
@@ -66,7 +67,7 @@ class UtilsTest extends TestCase
         }
 
         self::assertInstanceOf(CurlHandler::class, $handlers['sync']);
-        self::assertInstanceOf(CurlMultiHandler::class, $handlers['default']);
+        $handlers['default'] = self::createPooledHandler($handlers['default']);
         foreach ($handlers as $curlHandler) {
             $factory = \Closure::bind(static function ($handler): CurlFactory {
                 return $handler->factory;
@@ -102,9 +103,38 @@ class UtilsTest extends TestCase
         };
 
         self::assertInstanceOf(CurlHandler::class, $handlers['sync']);
-        self::assertInstanceOf(CurlMultiHandler::class, $handlers['default']);
+        $handlers['default'] = self::createPooledHandler($handlers['default']);
         self::assertSame(256, $maxHandles($handlers['sync']));
         self::assertSame(50, $maxHandles($handlers['default']));
+    }
+
+    /**
+     * @dataProvider idleHandlerLimitProvider
+     *
+     * @param array<string, int> $options
+     */
+    public function testChooseHandlerConfiguresIdleHandlerLimit(array $options, int $expected): void
+    {
+        self::skipIfDefaultCurlMultiHandlerIsUnavailable();
+
+        $handler = Utils::chooseHandler($options);
+        $handlers = (new \ReflectionFunction($handler))->getStaticVariables();
+        if (isset($handlers['streaming'])) {
+            $handlers = (new \ReflectionFunction($handlers['default']))->getStaticVariables();
+        }
+
+        $limit = \Closure::bind(static function (ContextualCurlMultiHandler $handler): int {
+            return $handler->maxIdleHandlers;
+        }, null, ContextualCurlMultiHandler::class)($handlers['default']);
+
+        self::assertSame($expected, $limit);
+    }
+
+    public static function idleHandlerLimitProvider(): iterable
+    {
+        yield 'default' => [[], 64];
+        yield 'disabled' => [['max_idle_multi_handlers' => 0], 0];
+        yield 'configured' => [['max_idle_multi_handlers' => 3], 3];
     }
 
     public function testChooseHandlerRejectsInvalidMaxIdleHandlesWithoutCurl(): void
@@ -459,6 +489,13 @@ class UtilsTest extends TestCase
         ) {
             self::markTestSkipped('Default cURL handler with share handles is unavailable.');
         }
+    }
+
+    private static function createPooledHandler(ContextualCurlMultiHandler $handler): CurlMultiHandler
+    {
+        return \Closure::bind(static function (ContextualCurlMultiHandler $handler): CurlMultiHandler {
+            return ($handler->factory)();
+        }, null, ContextualCurlMultiHandler::class)($handler);
     }
 
     private static function skipIfDefaultCurlMultiHandlerIsUnavailable(): void

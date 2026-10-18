@@ -1,0 +1,16 @@
+<?php
+
+// PHPStan's bundled Swoole stubs declare these return types as mixed.
+namespace Swoole;
+
+class Coroutine
+{
+    /** @return int */
+    public static function getCid() {}
+
+    /**
+     * @param int $cid
+     * @return \Swoole\Coroutine\Context|null
+     */
+    public static function getContext($cid = 0) {}
+}

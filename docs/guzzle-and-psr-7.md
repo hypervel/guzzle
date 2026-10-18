@@ -3,7 +3,7 @@
 This page covers how Guzzle integrates PSR-7 requests, responses, streams, and
 URIs while sending HTTP requests. Generic PSR-7 message, URI, stream, and helper
 documentation lives in
-[`guzzlehttp/psr7`](https://github.com/guzzle/psr7/blob/3.1/README.md).
+[`guzzlehttp/psr7`](https://github.com/guzzle/psr7/blob/3.2/README.md).
 
 ## Sending PSR-7 Requests
 
@@ -34,16 +34,16 @@ middleware and handlers.
 Guzzle uses PSR-7 stream objects to represent request and response bodies. For
 general stream creation, metadata, decorators, and PHP stream resource
 integration, see the
-[PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.1/docs/streams-and-decorators.md).
+[PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.2/docs/streams-and-decorators.md).
 
 For response bodies, the built-in stream handler creates or wraps the
 sink/default stream with the configured
-[`stream_factory`](request-options.md#stream_factory) where practical. For
-streamed gzip/deflate responses, the factory wraps the transport resource with
-its decoding filters already attached. Guzzle decorates filtered streamed bodies
-to return available bytes without waiting to fill the requested read length.
-Buffered gzip/deflate responses instead use Guzzle's `InflateStream` decorator
-over the factory's stream.
+[`stream_factory`](request-options.md#stream_factory) where practical. When
+response content decoding is enabled, the stream handler may layer its own
+decoding stream over that stream because PSR-17 cannot express a decoding
+stream. The stream handler likewise decodes chunked responses with its own
+decorator over that stream, and returns `stream => true` bodies through its own
+decorators, which end each body at its declared `Content-Length`.
 
 The built-in cURL handlers use libcurl for content decoding when it is enabled.
 libcurl writes the decoded bytes to the configured sink or default response body
@@ -86,4 +86,4 @@ itself is created with the
 
 - [Quick Start](quick-start.md)
 - [Request Options](request-options.md)
-- [PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.1/docs/streams-and-decorators.md)
+- [PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.2/docs/streams-and-decorators.md)

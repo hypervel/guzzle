@@ -15,8 +15,8 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Multiplexing;
-use GuzzleHttp\Promise\Is;
 use GuzzleHttp\Promise\PromiseInterface;
+use GuzzleHttp\Promise\State;
 use GuzzleHttp\Psr7;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
@@ -77,7 +77,7 @@ class ClientTest extends TestCase
 
         $promise = $client->sendAsync(new Request('GET', 'http://example.com'));
 
-        self::assertTrue(Is::rejected($promise));
+        self::assertTrue(State::isRejected($promise));
 
         try {
             $promise->wait();
@@ -178,7 +178,7 @@ class ClientTest extends TestCase
 
         $promise = $client->sendAsync($request);
 
-        self::assertTrue(Is::rejected($promise));
+        self::assertTrue(State::isRejected($promise));
 
         try {
             $promise->wait();
@@ -450,27 +450,48 @@ class ClientTest extends TestCase
         ]);
     }
 
-    public function testRejectsInvalidMaxIdleHandles(): void
+    /**
+     * @dataProvider idleLimitOptionProvider
+     */
+    public function testRejectsInvalidIdleLimits(string $option): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
+        $this->expectExceptionMessage($option.' must be a non-negative integer.');
 
-        new Client(['max_idle_handles' => -1]);
+        new Client([$option => -1]);
     }
 
-    public function testMaxIdleHandlesCannotBeUsedWithCustomHandler(): void
+    /**
+     * @dataProvider idleLimitOptionProvider
+     */
+    public function testIdleLimitsCannotBeUsedWithCustomHandler(string $option): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The "max_idle_handles" client option requires Guzzle to create the default handler. Configure the option on the CurlHandler or CurlMultiHandler constructor when providing a custom handler.');
+        $this->expectExceptionMessage('The "'.$option.'" client option requires Guzzle to create the default handler.');
 
-        new Client(['max_idle_handles' => 0, 'handler' => new MockHandler()]);
+        new Client([$option => 0, 'handler' => new MockHandler()]);
+    }
+
+    public static function idleLimitOptionProvider(): iterable
+    {
+        yield 'easy handles' => ['max_idle_handles'];
+        yield 'multi handlers' => ['max_idle_multi_handlers'];
     }
 
     public function testNullMaxIdleHandlesCanBeUsedWithCustomHandler(): void
     {
-        $client = new Client(['max_idle_handles' => null, 'handler' => new MockHandler()]);
+        $client = new Client(['max_idle_handles' => null, 'max_idle_multi_handlers' => null, 'handler' => new MockHandler()]);
 
         self::assertArrayNotHasKey('max_idle_handles', $client->getConfig());
+        self::assertArrayNotHasKey('max_idle_multi_handlers', $client->getConfig());
+    }
+
+    public function testIdleHandlerLimitCannotBeCombinedWithConnectionCaps(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The "max_idle_multi_handlers" option cannot be combined with connection caps');
+
+        new Client(['max_idle_multi_handlers' => 1, 'max_total_connections' => 2]);
     }
 
     public function testNullConnectionCapClientOptionsCanBeUsedWithCustomHandler(): void
@@ -3490,7 +3511,7 @@ class ClientTest extends TestCase
 
         $promise = $client->requestAsync('POST', 'http://example.com', $options);
 
-        self::assertTrue(Is::rejected($promise));
+        self::assertTrue(State::isRejected($promise));
 
         try {
             $promise->wait();

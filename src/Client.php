@@ -78,6 +78,10 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *   or null. Zero disables idle handle retention; null or omission keeps
      *   the defaults of 256 for CurlHandler and 50 for CurlMultiHandler. This
      *   setting does not affect the stream handler.
+     * - max_idle_multi_handlers: (int|null) Maximum number of idle cURL multi
+     *   handlers retained for coroutine requests. Accepts a non-negative integer
+     *   or null. Zero disables retention; null or omission keeps the default of
+     *   64. Cannot be combined with connection caps or a custom handler.
      * - max_total_connections: (int|null) Maximum concurrent connections
      *   overall, enforced by the default CurlMultiHandler. The default stream
      *   fallback receives the cap as a marker only: it rejects enabled
@@ -95,6 +99,7 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *     transport_sharing?: string|null,
      *     max_host_connections?: int|null,
      *     max_idle_handles?: int|null,
+     *     max_idle_multi_handlers?: int|null,
      *     max_total_connections?: int|null,
      *     allow_redirects?: bool|array{
      *         max?: int,
@@ -188,6 +193,8 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
 
         $maxIdleHandles = $config['max_idle_handles'] ?? null;
         unset($config['max_idle_handles']);
+        $maxIdleMultiHandlers = $config['max_idle_multi_handlers'] ?? null;
+        unset($config['max_idle_multi_handlers']);
 
         // Deliberately not unset: the value also becomes the default
         // "multiplex" request option, which the configured handler accepts.
@@ -200,6 +207,10 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         if (!isset($config['handler'])) {
             if ($maxIdleHandles !== null) {
                 $handlerOptions['max_idle_handles'] = $maxIdleHandles;
+            }
+
+            if ($maxIdleMultiHandlers !== null) {
+                $handlerOptions['max_idle_multi_handlers'] = $maxIdleMultiHandlers;
             }
 
             if ($transportSharingMode !== TransportSharing::NONE) {
@@ -217,6 +228,8 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
             throw new InvalidArgumentException('handler must be a callable');
         } elseif ($maxIdleHandles !== null) {
             throw new InvalidArgumentException('The "max_idle_handles" client option requires Guzzle to create the default handler. Configure the option on the CurlHandler or CurlMultiHandler constructor when providing a custom handler.');
+        } elseif ($maxIdleMultiHandlers !== null) {
+            throw new InvalidArgumentException('The "max_idle_multi_handlers" client option requires Guzzle to create the default handler. Configure the idle pool on ContextualCurlMultiHandler when providing a custom handler.');
         } elseif ($handlerOptions !== []) {
             throw new InvalidArgumentException('The "max_host_connections" and "max_total_connections" client options require Guzzle to create the default handler. Configure the options on the CurlMultiHandler constructor for numeric enforcement, or on the StreamHandler constructor to reject enabled response streaming, when providing a custom handler.');
         } elseif ($transportSharingMode === TransportSharing::HANDLER_REQUIRE) {

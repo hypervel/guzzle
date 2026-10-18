@@ -42,6 +42,7 @@ use Psr\Http\Client\RequestExceptionInterface;
 use Psr\Http\Message\MessageInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\StreamInterface;
 
 /**
  * @covers \GuzzleHttp\Handler\StreamHandler
@@ -1421,6 +1422,45 @@ class StreamHandlerTest extends TestCase
         self::assertSame('abc', (string) $response->getBody());
     }
 
+    public function testDecodesChunkedHttp10Response(): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        $handler = new StreamHandler();
+        $response = $handler(new Request('GET', Server::$url), [])->wait();
+
+        self::assertSame('1.0', $response->getProtocolVersion());
+        self::assertFalse($response->hasHeader('Transfer-Encoding'));
+        self::assertSame('abc', (string) $response->getBody());
+    }
+
+    public function testDetachesUnreadStreamedChunkedBodyWithPhpDecoding(): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), ['stream' => true])->wait()->getBody();
+
+        $resource = $body->detach();
+        self::assertIsResource($resource);
+        self::assertSame('abc', \stream_get_contents($resource));
+        \fclose($resource);
+    }
+
+    public function testDetachesPartiallyReadStreamedChunkedBody(): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), ['stream' => true])->wait()->getBody();
+        self::assertSame('a', $body->read(1));
+
+        $resource = $body->detach();
+        self::assertIsResource($resource);
+        self::assertSame('bc', \stream_get_contents($resource));
+        \fclose($resource);
+    }
+
     public function testDecodesChunkedTransferBeforeGzipContent(): void
     {
         $encoded = \gzencode('decoded');
@@ -1436,10 +1476,144 @@ class StreamHandlerTest extends TestCase
         self::assertSame('decoded', (string) $response->getBody());
     }
 
+    public function testRejectsTruncatedChunkedGzipContent(): void
+    {
+        $encoded = \gzencode(\str_repeat("hello world\n", 200));
+        self::assertIsString($encoded);
+        $truncated = \substr($encoded, 0, \intdiv(\strlen($encoded), 2));
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip\r\n\r\n".\dechex(\strlen($truncated))."\r\n{$truncated}\r\n");
+        $handler = new StreamHandler();
+
+        $this->expectException(ResponseTransferException::class);
+        $this->expectExceptionMessage('Response body ended before the chunked body was complete');
+        $handler(new Request('GET', Server::$url), ['decode_content' => true])->wait();
+    }
+
     /**
-     * @dataProvider phpChunkedTransferEncodingCompatibilityProvider
+     * @dataProvider validChunkedBodyProvider
      */
-    public function testPreservesPhpChunkedTransferEncodingCompatibility(string $transferEncodingHeaders, string $wireBody, string $expectedBody, string $expectedHeader): void
+    public function testDecodesChunkedResponseBodies(string $wireBody, string $expectedBody, bool $stream): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{$wireBody}");
+        $handler = new StreamHandler();
+        $response = $handler(new Request('GET', Server::$url), ['stream' => $stream])->wait();
+
+        self::assertFalse($response->hasHeader('Transfer-Encoding'));
+        self::assertSame($expectedBody, (string) $response->getBody());
+    }
+
+    public static function validChunkedBodyProvider(): iterable
+    {
+        $cases = [
+            'single chunk' => ["5\r\nhello\r\n0\r\n\r\n", 'hello'],
+            'uppercase hex' => ["A\r\n0123456789\r\n0\r\n\r\n", '0123456789'],
+            'seventeen digit chunk size' => ["00000000000000005\r\nhello\r\n0\r\n\r\n", 'hello'],
+            'zero padded last chunk' => ["5\r\nhello\r\n000\r\n\r\n", 'hello'],
+            'only last chunk' => ["0\r\n\r\n", ''],
+            'chunk extensions' => ["5;a=b\r\nhello\r\n6 ; c=\"d;e\"\r\n world\r\n0;z\r\n\r\n", 'hello world'],
+            'text after chunk size' => ["5x\r\nhello\r\n0\r\n\r\n", 'hello'],
+            'long chunk extension' => ['5;'.\str_repeat('a', 20000)."\r\nhello\r\n0\r\n\r\n", 'hello'],
+            'bare LF line endings' => ["5\nhello\n6\n world\n0\n\n", 'hello world'],
+            'repeated CR after chunk data' => ["5\r\nhello\r\r\n0\r\n\r\n", 'hello'],
+            'trailer fields' => ["5\r\nhello\r\n0\r\nX-A: 1\r\nX-B: 2\r\n\r\n", 'hello'],
+            'trailer field with bare LF' => ["5\r\nhello\r\n0\r\nX-A: 1\n\n", 'hello'],
+            'trailer field with leading whitespace' => ["5\r\nhello\r\n0\r\n \tX-A: 1\r\n\r\n", 'hello'],
+            'longest trailer field' => ["5\r\nhello\r\n0\r\nX-A: ".\str_repeat('a', 4088)."\r\n\r\n", 'hello'],
+            'bytes after the final CRLF' => ["5\r\nhello\r\n0\r\n\r\n5\r\nworld\r\n0\r\n\r\n", 'hello'],
+        ];
+
+        foreach ($cases as $name => [$wireBody, $expectedBody]) {
+            yield "{$name}, buffered" => [$wireBody, $expectedBody, false];
+            yield "{$name}, streamed" => [$wireBody, $expectedBody, true];
+        }
+    }
+
+    /**
+     * @dataProvider invalidChunkedBodyProvider
+     */
+    public function testRejectsInvalidBufferedChunkedResponseBodies(string $wireBody, string $expectedMessage): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{$wireBody}");
+        $handler = new StreamHandler();
+
+        try {
+            $handler(new Request('GET', Server::$url), [])->wait();
+            self::fail('Expected ResponseTransferException');
+        } catch (ResponseTransferException $e) {
+            self::assertSame($expectedMessage, $e->getMessage());
+            self::assertSame(200, $e->getResponse()->getStatusCode());
+        }
+    }
+
+    /**
+     * @dataProvider invalidChunkedBodyProvider
+     */
+    public function testThrowsWhenReadingInvalidStreamedChunkedResponseBodies(string $wireBody, string $expectedMessage): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{$wireBody}");
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), ['stream' => true])->wait()->getBody();
+
+        try {
+            while (!$body->eof()) {
+                $body->read(8192);
+            }
+            self::fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            self::assertNotInstanceOf(Psr7\Exception\TimeoutException::class, $e);
+            self::assertSame($expectedMessage, $e->getMessage());
+        }
+    }
+
+    public static function invalidChunkedBodyProvider(): iterable
+    {
+        $ended = 'Response body ended before the chunked body was complete';
+        $size = 'Invalid chunked response body: invalid chunk size';
+        $data = 'Invalid chunked response body: missing CRLF after chunk data';
+        $trailer = 'Invalid chunked response body: invalid trailer section';
+
+        yield 'empty body' => ['', $ended];
+        yield 'missing last chunk' => ["5\r\nhello\r\n", $ended];
+        yield 'ends in chunk data' => ["5\r\nhel", $ended];
+        yield 'ends before CRLF after chunk data' => ["5\r\nhello", $ended];
+        yield 'ends in chunk size' => ["5\r\nhello\r\n6", $ended];
+        yield 'ends in chunk extension' => ["5\r\nhello\r\n6;a\r", $ended];
+        yield 'ends after last chunk' => ["5\r\nhello\r\n0\r\n", $ended];
+        yield 'ends in final CRLF' => ["5\r\nhello\r\n0\r\n\r", $ended];
+        yield 'ends in trailer section' => ["5\r\nhello\r\n0\r\nX-A: 1\r\n", $ended];
+        yield 'bare CR ends chunk size' => ["5\rhello\r\n0\r\n\r\n", $ended];
+        yield 'largest chunk size' => [\dechex(\PHP_INT_MAX)."\r\nhello", $ended];
+        yield 'non-hex chunk size' => ["zz\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'empty chunk size' => ["\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'signed chunk size' => ["+5\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'negative chunk size' => ["-5\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'space before chunk size' => [" 5\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'invalid later chunk size' => ["5\r\nhello\r\nzz\r\n world\r\n0\r\n\r\n", $size];
+        yield 'eighteen digit chunk size' => ["000000000000000005\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'chunk size above the signed 64-bit range' => ["8000000000000000\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'seventeen significant digits' => ["10000000000000000\r\nhello\r\n0\r\n\r\n", $size];
+        yield 'chunk data longer than its size' => ["5\r\nhello!\r\n0\r\n\r\n", $data];
+        yield 'text instead of CRLF after chunk data' => ["5\r\nhelloXX0\r\n\r\n", $data];
+        yield 'CR then text after chunk data' => ["5\r\nhello\rX\n0\r\n\r\n", $data];
+        yield 'trailer field without colon' => ["5\r\nhello\r\n0\r\nbogus\r\n\r\n", $trailer];
+        yield 'trailer field with NUL' => ["5\r\nhello\r\n0\r\nX-A: a\0b\r\n\r\n", $trailer];
+        yield 'folded trailer field' => ["5\r\nhello\r\n0\r\nX-A: a\r\n b\r\n\r\n", $trailer];
+        yield 'bare CR in trailer field' => ["5\r\nhello\r\n0\r\nX-A: a\rb\r\n\r\n", $trailer];
+        yield 'trailer field too long' => ["5\r\nhello\r\n0\r\nX-A: ".\str_repeat('a', 4089)."\r\n\r\n", $trailer];
+        yield 'trailer section too long' => ["5\r\nhello\r\n0\r\n".\str_repeat('X-A: '.\str_repeat('a', 4000)."\r\n", 77)."\r\n", $trailer];
+        yield 'text after final CR' => ["5\r\nhello\r\n0\r\n\rX", $trailer];
+        yield 'second CR in final CRLF' => ["5\r\nhello\r\n0\r\n\r\r\n", $trailer];
+        yield 'zero chunk followed by data' => ["0\r\nhello\r\n\r\n", $trailer];
+    }
+
+    /**
+     * @dataProvider acceptedTransferEncodingProvider
+     */
+    public function testAcceptsResponseTransferEncodings(string $transferEncodingHeaders, string $wireBody, string $expectedBody, string $expectedHeader): void
     {
         Server::flush();
         Server::enqueueRawBytes("HTTP/1.1 200 OK\r\n{$transferEncodingHeaders}\r\n\r\n{$wireBody}");
@@ -1450,15 +1624,64 @@ class StreamHandlerTest extends TestCase
         self::assertSame($expectedBody, (string) $response->getBody());
     }
 
-    public static function phpChunkedTransferEncodingCompatibilityProvider(): iterable
+    public static function acceptedTransferEncodingProvider(): iterable
     {
         $chunked = "3\r\nabc\r\n0\r\n\r\n";
-        yield 'chunked prefix' => ['Transfer-Encoding: chunkedx', $chunked, 'abc', ''];
-        yield 'chunked after another coding' => ['Transfer-Encoding: gzip, chunked', $chunked, $chunked, 'gzip, chunked'];
+        yield 'mixed case chunked' => ['Transfer-Encoding: ChUnKeD', $chunked, 'abc', ''];
+        yield 'empty list elements' => ['Transfer-Encoding: , chunked,', $chunked, 'abc', ''];
+        yield 'identity before chunked' => ['Transfer-Encoding: identity, chunked', $chunked, 'abc', ''];
+        yield 'repeated chunked' => ['Transfer-Encoding: chunked, chunked', $chunked, 'abc', ''];
+        yield 'split identity and chunked' => ["Transfer-Encoding: identity\r\nTransfer-Encoding: chunked", $chunked, 'abc', ''];
+        yield 'identity only' => ['Transfer-Encoding: identity', 'abc', 'abc', 'identity'];
+        yield 'empty list' => ['Transfer-Encoding: ,', 'abc', 'abc', ','];
+    }
 
+    /**
+     * @dataProvider rejectedTransferEncodingProvider
+     */
+    public function testRejectsUnsupportedResponseTransferEncodings(string $transferEncodingHeaders, string $wireBody, string $expectedMessage, bool $stream): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\n{$transferEncodingHeaders}\r\n\r\n{$wireBody}");
+        $handler = new StreamHandler();
+        $onHeadersCalled = false;
+
+        try {
+            $handler(new Request('GET', Server::$url), [
+                'stream' => $stream,
+                'on_headers' => static function () use (&$onHeadersCalled): void {
+                    $onHeadersCalled = true;
+                },
+            ])->wait();
+            self::fail('Expected ResponseTransferException');
+        } catch (ResponseTransferException $e) {
+            self::assertSame($expectedMessage, $e->getMessage());
+            self::assertSame('', (string) $e->getResponse()->getBody());
+        }
+
+        self::assertFalse($onHeadersCalled);
+    }
+
+    public static function rejectedTransferEncodingProvider(): iterable
+    {
+        $chunked = "3\r\nabc\r\n0\r\n\r\n";
         $gzip = (string) \gzencode('abc');
-        $chunkedGzip = \dechex(\strlen($gzip))."\r\n{$gzip}\r\n0\r\n\r\n";
-        yield 'split transfer codings' => ["Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked", $chunkedGzip, $gzip, 'gzip'];
+        $cases = [
+            'coding before chunked' => ['Transfer-Encoding: gzip, chunked', \dechex(\strlen($gzip))."\r\n{$gzip}\r\n0\r\n\r\n", 'Invalid Transfer-Encoding response header: unsupported transfer coding "gzip"'],
+            'split coding before chunked' => ["Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked", \dechex(\strlen($gzip))."\r\n{$gzip}\r\n0\r\n\r\n", 'Invalid Transfer-Encoding response header: unsupported transfer coding "gzip"'],
+            'coding without chunked' => ['Transfer-Encoding: gzip', $gzip, 'Invalid Transfer-Encoding response header: unsupported transfer coding "gzip"'],
+            'chunked prefix' => ['Transfer-Encoding: chunkedx', $chunked, 'Invalid Transfer-Encoding response header: unsupported transfer coding "chunkedx"'],
+            'chunked parameter' => ['Transfer-Encoding: chunked;q=1', $chunked, 'Invalid Transfer-Encoding response header: unsupported transfer coding "chunked;q=1"'],
+            'quoted chunked' => ['Transfer-Encoding: "chunked"', $chunked, 'Invalid Transfer-Encoding response header: unsupported transfer coding ""chunked""'],
+            'coding after chunked' => ['Transfer-Encoding: chunked, gzip', (string) \gzencode($chunked), 'Invalid Transfer-Encoding response header: chunked is not the final transfer coding'],
+            'identity after chunked' => ['Transfer-Encoding: chunked, identity', $chunked, 'Invalid Transfer-Encoding response header: chunked is not the final transfer coding'],
+            'split coding after chunked' => ["Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip", (string) \gzencode($chunked), 'Invalid Transfer-Encoding response header: unsupported transfer coding "gzip"'],
+        ];
+
+        foreach ($cases as $name => [$headers, $wireBody, $message]) {
+            yield "{$name}, buffered" => [$headers, $wireBody, $message, false];
+            yield "{$name}, streamed" => [$headers, $wireBody, $message, true];
+        }
     }
 
     public function testRejectsChunkedResponseWithContentLengthOverTheWire(): void
@@ -1670,6 +1893,7 @@ class StreamHandlerTest extends TestCase
             'GET 304' => ['GET', ['HTTP/1.1 304 Not Modified', 'Content-Length: 8'], 'roguebody', 304, '8'],
             'CONNECT 200' => ['CONNECT', ['HTTP/1.1 200 OK', 'Content-Length: 3'], 'roguebody', 200, '3'],
             'GET 204, chunked, rogue bytes' => ['GET', ['HTTP/1.1 204 No Content', 'Transfer-Encoding: chunked'], "0\r\n\r\nrogue", 204, ''],
+            'GET 204, chunked then another coding' => ['GET', ['HTTP/1.1 204 No Content', 'Transfer-Encoding: chunked, gzip'], 'roguebody', 204, ''],
         ];
     }
 
@@ -1743,7 +1967,10 @@ class StreamHandlerTest extends TestCase
         self::assertTrue(!$response->hasHeader('content-length') || $response->getHeaderLine('content-length') == $response->getBody()->getSize());
     }
 
-    public function testDecodedGzipLargerThanEncodedReturnsFullBodyAndDropsContentLength(): void
+    /**
+     * @dataProvider streamOptionProvider
+     */
+    public function testDecodedGzipLargerThanEncodedReturnsFullBodyAndDropsContentLength(bool $stream): void
     {
         $decoded = \str_repeat('A', 1000);
         $gzip = \gzencode($decoded);
@@ -1764,7 +1991,7 @@ class StreamHandlerTest extends TestCase
         ];
 
         /** @var ResponseInterface $response */
-        $response = $this->invokeStreamHandlerCreateResponse($handler, $request, ['decode_content' => true], $resource, $headers)->wait();
+        $response = $this->invokeStreamHandlerCreateResponse($handler, $request, ['decode_content' => true, 'stream' => $stream], $resource, $headers)->wait();
 
         self::assertSame(200, $response->getStatusCode());
         self::assertSame($decoded, (string) $response->getBody());
@@ -1772,7 +1999,7 @@ class StreamHandlerTest extends TestCase
         self::assertSame((string) \strlen($gzip), $response->getHeaderLine('x-encoded-content-length'));
     }
 
-    public function testStreamedDecodedResponseDoesNotEnforceEncodedContentLength(): void
+    public function testStreamedDecodedResponseRejectsShortEncodedContentLength(): void
     {
         $decoded = 'decoded';
         $gzip = \gzencode($decoded);
@@ -1792,13 +2019,155 @@ class StreamHandlerTest extends TestCase
             $handler,
             $request,
             ['decode_content' => true, 'stream' => true],
-            Psr7\Utils::streamFor($gzip)->detach(),
+            Psr7\Utils::streamFor($gzip),
             $headers
         )->wait();
 
-        self::assertSame($decoded, (string) $response->getBody());
         self::assertFalse($response->hasHeader('Content-Length'));
         self::assertSame($declaredLength, $response->getHeaderLine('x-encoded-content-length'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Response body ended before the declared Content-Length was reached');
+
+        $response->getBody()->getContents();
+    }
+
+    /**
+     * @dataProvider streamedGzipProtocolVersionProvider
+     */
+    public function testReadsStreamedGzipResponseAsItArrives(string $protocolVersion): void
+    {
+        Server::flush();
+        $response = (new StreamHandler())(
+            new Request('GET', Server::$url.'guzzle-server/drip-timeout-gzip', [], null, $protocolVersion),
+            ['decode_content' => true, 'stream' => true, 'read_timeout' => 10]
+        )->wait();
+        $body = $response->getBody();
+        $expected = \str_repeat("hi there ... this gzip body arrives slowly\n", 64);
+
+        try {
+            $first = $body->read(8192);
+            self::assertNotSame('', $first);
+            self::assertLessThan(\strlen($expected), \strlen($first));
+            self::assertSame($expected, $first.$body->getContents());
+        } finally {
+            $body->close();
+        }
+    }
+
+    public static function streamedGzipProtocolVersionProvider(): iterable
+    {
+        // The test server only uses chunked transfer coding for HTTP/1.1.
+        yield 'close-delimited' => ['1.0'];
+        yield 'chunked' => ['1.1'];
+    }
+
+    /**
+     * @dataProvider streamedGzipProtocolVersionProvider
+     */
+    public function testReadsStreamedGzipBytesThatArrivedWithTheHeaders(string $protocolVersion): void
+    {
+        Server::flush();
+        $response = (new StreamHandler())(
+            new Request('GET', Server::$url.'guzzle-server/read-timeout-gzip', [], null, $protocolVersion),
+            ['decode_content' => true, 'stream' => true, 'read_timeout' => 10]
+        )->wait();
+        $body = $response->getBody();
+
+        try {
+            // The server sends the headers and half of the body together, then
+            // stalls for 60 seconds.
+            $start = Clock::now();
+            $first = $body->read(8192);
+            self::assertLessThan(5, Clock::now() - $start);
+            self::assertNotSame('', $first);
+            self::assertStringStartsWith($first, \str_repeat("hi there ... this gzip body never finishes\n", 64));
+        } finally {
+            $body->close();
+        }
+    }
+
+    /**
+     * @dataProvider invalidCompressedBodyProvider
+     */
+    public function testRejectsInvalidCompressedResponseBody(string $body): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ".\strlen($body)."\r\n\r\n".$body);
+
+        try {
+            (new StreamHandler())(new Request('GET', Server::$url), ['decode_content' => true])->wait();
+            self::fail('Expected ResponseTransferException');
+        } catch (ResponseTransferException $e) {
+            self::assertSame('Unable to decode the response body: invalid gzip or deflate data', $e->getMessage());
+            self::assertSame('gzip', $e->getResponse()->getHeaderLine('x-encoded-content-encoding'));
+        }
+    }
+
+    /**
+     * @dataProvider invalidCompressedBodyProvider
+     */
+    public function testFailsReadingInvalidCompressedStreamedBody(string $body): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ".\strlen($body)."\r\n\r\n".$body);
+        $onHeaders = false;
+
+        $response = (new StreamHandler())(new Request('GET', Server::$url), [
+            'decode_content' => true,
+            'stream' => true,
+            'on_headers' => static function () use (&$onHeaders): void {
+                $onHeaders = true;
+            },
+        ])->wait();
+
+        self::assertTrue($onHeaders);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Unable to decode the response body: invalid gzip or deflate data');
+        $response->getBody()->getContents();
+    }
+
+    public static function invalidCompressedBodyProvider(): iterable
+    {
+        $decoded = \str_repeat('payload-', 100);
+        $gzip = (string) \gzencode($decoded);
+        $badChecksum = $gzip;
+        $badChecksum[\strlen($gzip) - 8] = \chr(\ord($gzip[\strlen($gzip) - 8]) ^ 0xFF);
+
+        yield 'raw deflate' => [(string) \gzdeflate($decoded)];
+        yield 'not compressed' => [$decoded];
+        yield 'bad checksum' => [$badChecksum];
+    }
+
+    public function testRejectsDataAfterCompressedResponseBody(): void
+    {
+        $decoded = \str_repeat('payload-', 100);
+        $body = \gzencode($decoded).\gzencode('second');
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ".\strlen($body)."\r\n\r\n".$body);
+
+        try {
+            (new StreamHandler())(new Request('GET', Server::$url), ['decode_content' => true])->wait();
+            self::fail('Expected ResponseTransferException');
+        } catch (ResponseTransferException $e) {
+            self::assertSame('Unable to decode the response body: unexpected data after the compressed stream', $e->getMessage());
+
+            $body = $e->getResponse()->getBody();
+            $body->rewind();
+            self::assertSame($decoded, (string) $body);
+        }
+    }
+
+    public function testDecodesRawDeflateResponseBodyLabelledDeflate(): void
+    {
+        $decoded = \str_repeat('payload-', 100);
+        $body = (string) \gzdeflate($decoded);
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nContent-Length: ".\strlen($body)."\r\n\r\n".$body);
+
+        $response = (new StreamHandler())(new Request('GET', Server::$url), ['decode_content' => true])->wait();
+
+        self::assertSame($decoded, (string) $response->getBody());
     }
 
     public function testDecodedResponseStopsAtEncodedContentLength(): void
@@ -4888,7 +5257,7 @@ class StreamHandlerTest extends TestCase
 
         $process = \proc_open(
             $command,
-            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
             $pipes
         );
         if (!\is_resource($process)) {
@@ -4944,6 +5313,25 @@ class StreamHandlerTest extends TestCase
         }
         \proc_close($process);
         @\unlink($certificate);
+    }
+
+    /**
+     * Reads the next bytes of a streamed body, retrying idle timeouts that
+     * expire before they arrive.
+     */
+    private static function readAfterTimeouts(StreamInterface $body): string
+    {
+        for ($attempt = 0; $attempt < 10; ++$attempt) {
+            try {
+                $data = $body->read(8192);
+                if ($data !== '') {
+                    return $data;
+                }
+            } catch (Psr7\Exception\TimeoutException $e) {
+            }
+        }
+
+        self::fail('Expected more of the streamed body');
     }
 
     private function invokeTlsSessionResumption(StreamHandler $handler, RequestInterface $request, array &$context, array $customSslContext = []): ?\Closure
@@ -5025,22 +5413,92 @@ class StreamHandlerTest extends TestCase
         ]);
     }
 
-    public function testDrainsResponseAndReadsAllContentWhenContentLengthIsZero(): void
+    /**
+     * @dataProvider streamOptionProvider
+     */
+    public function testContentLengthZeroResponseBodyIsEmpty(bool $stream): void
     {
         Server::flush();
-        Server::enqueue([
-            new Response(200, [
-                'Foo' => 'Bar',
-                'Content-Length' => '0',
-            ], 'hi there... This has a lot of data!'),
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nhi there");
+        $handler = new StreamHandler();
+        $response = $handler(new Request('GET', Server::$url), ['stream' => $stream])->wait();
+
+        self::assertSame('', (string) $response->getBody());
+    }
+
+    /**
+     * @dataProvider streamOptionProvider
+     */
+    public function testResponseBodyStopsAtDeclaredContentLength(bool $stream): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello there");
+        $handler = new StreamHandler();
+        $response = $handler(new Request('GET', Server::$url), ['stream' => $stream])->wait();
+
+        self::assertSame('hello', (string) $response->getBody());
+    }
+
+    public function testStreamedResponseBodyThrowsWhenShorterThanContentLength(): void
+    {
+        Server::flush();
+        Server::enqueueRawBytes("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel");
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), ['stream' => true])->wait()->getBody();
+
+        self::assertSame('hel', $body->read(5));
+        self::assertFalse($body->eof());
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Response body ended before the declared Content-Length was reached');
+
+        $body->read(5);
+    }
+
+    public function testEndsStreamedBodyAtContentLengthWhileConnectionStaysOpen(): void
+    {
+        Server::flush();
+        Server::enqueueRawByteParts([
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel",
+            200,
+            'lo',
+            5000,
         ]);
         $handler = new StreamHandler();
-        $request = new Request('GET', Server::$url);
-        $response = $handler($request, [])->wait();
-        $body = $response->getBody();
-        $stream = $body->detach();
-        self::assertSame('hi there... This has a lot of data!', \stream_get_contents($stream));
-        \fclose($stream);
+        $body = $handler(new Request('GET', Server::$url), [
+            RequestOptions::READ_TIMEOUT => 1,
+            RequestOptions::STREAM => true,
+        ])->wait()->getBody();
+
+        try {
+            self::assertSame('hello', $body->getContents());
+            self::assertTrue($body->eof());
+        } finally {
+            $body->close();
+        }
+    }
+
+    public function testReadsStreamedBodyBytesThatArrivedWithTheHeaders(): void
+    {
+        Server::flush();
+        Server::enqueueRawByteParts(["HTTP/1.1 200 OK\r\n\r\nhel", 3000, 'lo']);
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), [
+            RequestOptions::READ_TIMEOUT => 10,
+            RequestOptions::STREAM => true,
+        ])->wait()->getBody();
+
+        try {
+            self::assertSame('hel', $body->read(8192));
+        } finally {
+            $body->close();
+        }
+    }
+
+    public static function streamOptionProvider(): iterable
+    {
+        yield 'buffered' => [false];
+        yield 'streamed' => [true];
     }
 
     public function testHonorsReadTimeout(): void
@@ -5065,65 +5523,130 @@ class StreamHandlerTest extends TestCase
         self::assertFalse(\feof($body));
     }
 
-    /**
-     * @dataProvider incrementalResponseProvider
-     */
-    public function testReadsFilteredResponsesIncrementally(string $endpoint, string $expected): void
+    public function testReadsStreamedChunkedBodyIncrementally(): void
     {
-        $response = (new StreamHandler())(
-            new Request('GET', Server::$url.'guzzle-server/'.$endpoint),
-            ['stream' => true, 'decode_content' => true, 'read_timeout' => 10]
+        Server::flush();
+        $handler = new StreamHandler();
+        $response = $handler(
+            new Request('GET', Server::$url.'guzzle-server/drip-timeout'),
+            [RequestOptions::STREAM => true]
         )->wait();
         $body = $response->getBody();
 
+        // The server sends one byte every 100ms, so a read that waits to fill
+        // the requested length returns the whole body.
+        $data = $body->read(8192);
+        self::assertNotSame('', $data);
+        self::assertLessThan(20, \strlen($data));
+
+        self::assertSame(\str_repeat('.', 20), $data.$body->getContents());
+    }
+
+    public function testReadsStreamedChunkedBodyAsItArrivesWhileConnectionStaysOpen(): void
+    {
+        Server::flush();
+        Server::enqueueRawByteParts([
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+            1000,
+            "1\r\nb\r\n0\r\n\r\n",
+            5000,
+        ]);
+        $handler = new StreamHandler();
+        $body = $handler(new Request('GET', Server::$url), [
+            RequestOptions::READ_TIMEOUT => 0.5,
+            RequestOptions::STREAM => true,
+        ])->wait()->getBody();
+
         try {
-            $first = $body->read(8192);
-            self::assertNotSame('', $first);
-            self::assertLessThan(\strlen($expected), \strlen($first));
-            self::assertSame($expected, $first.$body->getContents());
+            self::assertSame('a', $body->read(8192));
+
+            try {
+                $body->read(8192);
+                self::fail('Expected TimeoutException');
+            } catch (Psr7\Exception\TimeoutException $e) {
+            }
+
+            self::assertSame('b', self::readAfterTimeouts($body));
+            self::assertTrue($body->eof());
         } finally {
             $body->close();
         }
     }
 
-    public static function incrementalResponseProvider(): iterable
+    public function testCompletesBufferedChunkedBodyWhileConnectionStaysOpen(): void
     {
-        yield 'chunked' => ['drip-timeout', \str_repeat('.', 20)];
-        yield 'chunked gzip' => ['drip-timeout-gzip', \str_repeat("hi there ... this gzip body arrives slowly\n", 64)];
+        Server::flush();
+        Server::enqueueRawByteParts([
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+            200,
+            "1\r\nb\r\n0\r\n\r\n",
+            5000,
+        ]);
+        $handler = new StreamHandler();
+        $response = $handler(new Request('GET', Server::$url), [RequestOptions::READ_TIMEOUT => 1])->wait();
+
+        self::assertSame('ab', (string) $response->getBody());
     }
 
-    public function testReadsFilteredTlsResponseIncrementallyAfterTimeout(): void
+    public function testReadsStreamedChunkedTlsBodyAsItArrives(): void
     {
         $this->skipIfTlsHttpServerIsUnavailable();
-        [$address, $certificate, $process, $pipes] = $this->startTlsHttpServer('stream-timeout');
+        [$address, $certificate, $process, $pipes] = $this->startTlsHttpServer('chunked');
         $body = null;
 
         try {
-            $response = (new StreamHandler())(
-                new Request('GET', 'https://'.$address),
-                ['stream' => true, 'read_timeout' => 0.2, 'verify' => false]
-            )->wait();
+            \fwrite($pipes[0], "\n");
+            $handler = new StreamHandler();
+            $response = $handler(new Request('GET', 'https://'.$address), [
+                RequestOptions::READ_TIMEOUT => 0.2,
+                RequestOptions::STREAM => true,
+                RequestOptions::VERIFY => false,
+            ])->wait();
             $body = $response->getBody();
-            $chunks = [];
-            $timeouts = 0;
-            while (!$body->eof()) {
-                try {
-                    $chunk = $body->read(8192);
-                    if ($chunk !== '') {
-                        $chunks[] = $chunk;
-                    }
-                } catch (Psr7\Exception\TimeoutException $e) {
-                    ++$timeouts;
-                }
+
+            // The first chunk arrived with the headers, so reading it must not
+            // wait for the idle timeout.
+            self::assertSame('a', $body->read(8192));
+            self::assertFalse($body->getMetadata('timed_out'));
+
+            try {
+                $body->read(8192);
+                self::fail('Expected TimeoutException');
+            } catch (Psr7\Exception\TimeoutException $e) {
             }
 
-            self::assertGreaterThan(0, $timeouts);
-            self::assertSame('abc', \implode('', $chunks));
-            self::assertLessThan(3, \strlen($chunks[0]));
+            // PHP's TLS streams keep reporting the earlier timeout, which must
+            // not discard bytes that arrive later.
+            \fwrite($pipes[0], "\n");
+            self::assertSame('b', self::readAfterTimeouts($body));
+
+            // The server keeps the connection open after the last chunk.
+            \fwrite($pipes[0], "\n");
+            self::assertSame('c', self::readAfterTimeouts($body));
+            self::assertTrue($body->eof());
         } finally {
             if ($body !== null) {
                 $body->close();
             }
+            $this->stopTlsHttpServer($process, $pipes, $certificate);
+        }
+    }
+
+    public function testCompletesBufferedChunkedTlsBodyWhileConnectionStaysOpen(): void
+    {
+        $this->skipIfTlsHttpServerIsUnavailable();
+        [$address, $certificate, $process, $pipes] = $this->startTlsHttpServer('chunked');
+
+        try {
+            \fwrite($pipes[0], "\n\n\n");
+            $handler = new StreamHandler();
+            $response = $handler(new Request('GET', 'https://'.$address), [
+                RequestOptions::READ_TIMEOUT => 2,
+                RequestOptions::VERIFY => false,
+            ])->wait();
+
+            self::assertSame('abc', (string) $response->getBody());
+        } finally {
             $this->stopTlsHttpServer($process, $pipes, $certificate);
         }
     }
@@ -5710,10 +6233,9 @@ class StreamHandlerTest extends TestCase
             RequestOptions::RESPONSE_FACTORY => $factory,
         ])->wait();
 
-        self::assertInstanceOf(SpyStream::class, $response->getBody());
         self::assertSame('hi there', (string) $response->getBody());
         // The stream option short-circuits sink creation, so only the body
-        // source is wrapped by the stream factory.
+        // source is wrapped by the stream factory, beneath Guzzle's decorators.
         self::assertSame(1, $factory->createStreamFromResourceCalls);
     }
 
@@ -5743,7 +6265,8 @@ class StreamHandlerTest extends TestCase
         ], $resource, $headers)->wait();
 
         self::assertSame('decoded', (string) $response->getBody());
-        // The factory wraps the transport once, with decoding already attached.
+        // The transport resource is wrapped via the stream factory once, up
+        // front; the decode path then layers its decoder over that stream.
         self::assertSame(1, $factory->createStreamFromResourceCalls);
 
         // A non-decoded streamed body source is wrapped exactly the same way.
@@ -5760,7 +6283,6 @@ class StreamHandlerTest extends TestCase
             RequestOptions::STREAM_FACTORY => $plainFactory,
         ], $plainResource, ['HTTP/1.1 200 OK'])->wait();
 
-        self::assertInstanceOf(SpyStream::class, $plainResponse->getBody());
         self::assertSame('plain', (string) $plainResponse->getBody());
         self::assertSame(1, $plainFactory->createStreamFromResourceCalls);
     }
