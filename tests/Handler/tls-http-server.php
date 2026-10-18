@@ -3,10 +3,15 @@
 declare(strict_types=1);
 
 /*
- * Minimal HTTPS server fixture for the stream handler tests. Serves a fixed
- * body and reports session reuse, or sends a chunked body after an idle timeout.
- * Usage: php tls-http-server.php <certificate-pem-path> [tls1.2|stream-timeout].
- * The bound address is printed on stdout once the server is listening.
+ * Minimal HTTPS server fixture for the stream handler TLS tests. Serves a fixed
+ * body to each connection until it is terminated and reports whether the
+ * handshake resumed a TLS session in the X-TLS-Session-Reused response header.
+ * In chunked mode, each line read from stdin releases the next piece of a
+ * chunked response instead, the first carrying the headers and the first chunk,
+ * and the connection then stays open until stdin delivers another line or
+ * closes. Usage: php tls-http-server.php <certificate-pem-path>
+ * [tls1.2|chunked]. The bound address is printed on stdout once the server is
+ * listening.
  */
 
 $certificate = $argv[1] ?? '';
@@ -16,8 +21,8 @@ if ($certificate === '' || !\is_file($certificate)) {
 }
 
 $mode = $argv[2] ?? null;
-if ($mode !== null && $mode !== 'tls1.2' && $mode !== 'stream-timeout') {
-    \fwrite(\STDERR, "The optional mode must be tls1.2 or stream-timeout.\n");
+if ($mode !== null && $mode !== 'tls1.2' && $mode !== 'chunked') {
+    \fwrite(\STDERR, "The optional mode must be tls1.2 or chunked.\n");
     exit(1);
 }
 
@@ -48,13 +53,20 @@ if ($server === false) {
 
 while (($connection = @\stream_socket_accept($server, 30)) !== false) {
     @\fread($connection, 8192);
-    if ($mode === 'stream-timeout') {
-        \fwrite($connection, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
-        \usleep(500000);
-        \fwrite($connection, "1\r\na\r\n");
-        \usleep(100000);
-        \fwrite($connection, "2\r\nbc\r\n0\r\n\r\n");
-        \fclose($connection);
+    if ($mode === 'chunked') {
+        $pieces = [
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\na\r\n",
+            "1\r\nb\r\n",
+            "1\r\nc\r\n0\r\n\r\n",
+        ];
+        foreach ($pieces as $piece) {
+            if (\fgets(\STDIN) === false) {
+                break;
+            }
+            @\fwrite($connection, $piece);
+        }
+        \fgets(\STDIN);
+        @\fclose($connection);
         continue;
     }
     // PHP 8.6 reports whether the accepted handshake resumed a TLS session;

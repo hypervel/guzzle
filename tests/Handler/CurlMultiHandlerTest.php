@@ -155,7 +155,7 @@ class CurlMultiHandlerTest extends TestCase
         $response = $immediate->wait();
 
         self::assertSame(200, $response->getStatusCode());
-        self::assertTrue(P\Is::pending($delayed));
+        self::assertTrue(P\State::isPending($delayed));
 
         $delayed->cancel();
     }
@@ -173,7 +173,7 @@ class CurlMultiHandlerTest extends TestCase
         $response = $immediate->wait();
 
         self::assertSame(200, $response->getStatusCode());
-        self::assertTrue(P\Is::pending($delayed));
+        self::assertTrue(P\State::isPending($delayed));
 
         $delayed->cancel();
     }
@@ -211,7 +211,7 @@ class CurlMultiHandlerTest extends TestCase
 
         self::assertSame(200, $response->getStatusCode());
         self::assertInstanceOf(P\PromiseInterface::class, $spawned);
-        self::assertTrue(P\Is::pending($spawned));
+        self::assertTrue(P\State::isPending($spawned));
 
         $spawned->cancel();
     }
@@ -237,7 +237,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertSame(200, $response->getStatusCode());
             self::assertLessThan(2.5, $elapsed, 'The synchronous wait blocked on an unrelated transfer after the target had completed.');
-            self::assertTrue(P\Is::pending($sibling));
+            self::assertTrue(P\State::isPending($sibling));
         } finally {
             $sibling->cancel();
             $handler->close();
@@ -269,9 +269,9 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertLessThan(2.5, $elapsed, 'The synchronous wait selected for an unrelated transfer after the target had been canceled.');
-            self::assertTrue(P\Is::rejected($target));
+            self::assertTrue(P\State::isRejected($target));
             self::assertSame(1, self::readMultiProperty($handler, 'active'));
-            self::assertTrue(P\Is::pending($sibling));
+            self::assertTrue(P\State::isPending($sibling));
         } finally {
             $sibling->cancel();
             $handler->close();
@@ -302,7 +302,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertSame(200, $response->getStatusCode());
             self::assertLessThan(2.5, $elapsed, 'The delayed synchronous target waited for an unrelated transfer before attaching.');
-            self::assertTrue(P\Is::pending($sibling));
+            self::assertTrue(P\State::isPending($sibling));
         } finally {
             $sibling->cancel();
             $handler->close();
@@ -326,15 +326,15 @@ class CurlMultiHandlerTest extends TestCase
 
             $start = \microtime(true);
             $deadline = $start + 10;
-            while (P\Is::pending($delayed) && \microtime(true) < $deadline) {
+            while (P\State::isPending($delayed) && \microtime(true) < $deadline) {
                 $handler->tick();
             }
             $elapsed = \microtime(true) - $start;
 
-            self::assertTrue(P\Is::fulfilled($delayed));
+            self::assertTrue(P\State::isFulfilled($delayed));
             self::assertSame(200, $delayed->wait()->getStatusCode());
             self::assertLessThan(2.5, $elapsed, 'The delayed request waited for an unrelated transfer before attaching.');
-            self::assertTrue(P\Is::pending($sibling));
+            self::assertTrue(P\State::isPending($sibling));
         } finally {
             $sibling->cancel();
             $handler->close();
@@ -363,7 +363,7 @@ class CurlMultiHandlerTest extends TestCase
             $handler->execute();
             $elapsed = \microtime(true) - $start;
 
-            self::assertTrue(P\Is::fulfilled($delayed));
+            self::assertTrue(P\State::isFulfilled($delayed));
             self::assertLessThan(2.5, $elapsed, 'The delayed request waited for an unrelated transfer while executing.');
         } finally {
             $sibling->cancel();
@@ -391,7 +391,7 @@ class CurlMultiHandlerTest extends TestCase
 
         $promise->cancel();
 
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
         self::assertArrayHasKey($id, self::readMultiProperty($handler, 'handles'));
 
         $handler->close();
@@ -455,7 +455,7 @@ class CurlMultiHandlerTest extends TestCase
         // The replacement request must be left entirely alone.
         $handles = self::readMultiProperty($handler, 'handles');
         self::assertArrayHasKey($id, $handles);
-        self::assertTrue(P\Is::pending($handles[$id]['deferred']));
+        self::assertTrue(P\State::isPending($handles[$id]['deferred']));
 
         $handler->close();
     }
@@ -667,7 +667,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertLessThan(2.5, $elapsed, 'The wait selected on the quiescent target before running the sibling completion continuation.');
-            self::assertTrue(P\Is::fulfilled($sibling));
+            self::assertTrue(P\State::isFulfilled($sibling));
         } finally {
             $target->cancel();
             $handler->close();
@@ -693,13 +693,13 @@ class CurlMultiHandlerTest extends TestCase
 
         try {
             $deadline = \microtime(true) + 5;
-            while (P\Is::pending($original) && \microtime(true) < $deadline) {
+            while (P\State::isPending($original) && \microtime(true) < $deadline) {
                 $handler->tick();
             }
 
-            self::assertTrue(P\Is::rejected($original));
+            self::assertTrue(P\State::isRejected($original));
             self::assertInstanceOf(P\PromiseInterface::class, $spawned);
-            self::assertTrue(P\Is::pending($spawned));
+            self::assertTrue(P\State::isPending($spawned));
         } finally {
             if ($spawned !== null) {
                 $spawned->cancel();
@@ -754,7 +754,7 @@ class CurlMultiHandlerTest extends TestCase
             $start = \microtime(true);
             $handler->execute();
 
-            self::assertTrue(P\Is::rejected($delayed));
+            self::assertTrue(P\State::isRejected($delayed));
             self::assertLessThan(2.5, \microtime(true) - $start, 'execute() slept over a queued cancellation.');
         } finally {
             $handler->close();
@@ -944,7 +944,7 @@ class CurlMultiHandlerTest extends TestCase
         self::assertSame([], self::readMultiProperty($handler, 'handles'));
         self::assertSame([], self::readMultiProperty($handler, 'delays'));
         self::assertFalse(self::hasMultiHandle($handler));
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
     }
 
     public function testThrowsWhenCurlMultiOptionNameIsInvalid(): void
@@ -1970,7 +1970,7 @@ class CurlMultiHandlerTest extends TestCase
 
         $handler->close();
 
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
 
         $this->expectException(HandlerClosedException::class);
         $this->expectExceptionMessage('The cURL multi handler was closed before the transfer completed.');
@@ -1988,7 +1988,7 @@ class CurlMultiHandlerTest extends TestCase
         $handler->close();
 
         self::assertFalse(self::hasMultiHandle($handler));
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
     }
 
     public function testCloseDoesNotRunPromiseQueue(): void
@@ -2004,7 +2004,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $handler->close();
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertFalse($called);
         } finally {
             P\Utils::queue()->run();
@@ -2018,7 +2018,7 @@ class CurlMultiHandlerTest extends TestCase
 
         $handler->__destruct();
 
-        self::assertTrue(P\Is::pending($promise));
+        self::assertTrue(P\State::isPending($promise));
     }
 
     public function testClosePreventsReuse(): void
@@ -2120,7 +2120,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $handler->close();
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertIsResource($sink);
             self::assertNotFalse(\fwrite($sink, 'still open'));
         } finally {
@@ -2141,7 +2141,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $handler->close();
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertIsResource($sink);
             self::assertNotFalse(\fwrite($sink, 'still open'));
         } finally {
@@ -2177,7 +2177,7 @@ class CurlMultiHandlerTest extends TestCase
 
         $handler->close();
 
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
         self::assertArrayNotHasKey(\CURLOPT_PROGRESSFUNCTION, $_SERVER['_curl']);
         if (\defined('CURLOPT_XFERINFOFUNCTION')) {
             self::assertArrayNotHasKey((int) \constant('CURLOPT_XFERINFOFUNCTION'), $_SERVER['_curl']);
@@ -2201,7 +2201,7 @@ class CurlMultiHandlerTest extends TestCase
         }
 
         foreach ($responses as $r) {
-            self::assertTrue(P\Is::rejected($r));
+            self::assertTrue(P\State::isRejected($r));
         }
     }
 
@@ -2240,7 +2240,7 @@ class CurlMultiHandlerTest extends TestCase
 
         $promise->cancel();
 
-        self::assertTrue(P\Is::rejected($promise));
+        self::assertTrue(P\State::isRejected($promise));
         self::assertArrayNotHasKey(\CURLOPT_PROGRESSFUNCTION, $_SERVER['_curl']);
         self::assertArrayNotHasKey(\CURLOPT_READFUNCTION, $_SERVER['_curl']);
         if (\defined('CURLOPT_SEEKFUNCTION')) {
@@ -2286,7 +2286,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL progress cancellation.');
                 }
@@ -2296,7 +2296,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertGreaterThan(0, $progressCalls);
             self::assertTrue($cancelled);
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
         } finally {
             $handler->close();
             Server::flush();
@@ -2331,7 +2331,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL progress cancellation.');
                 }
@@ -2340,7 +2340,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertTrue($cancelled);
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             // The handler stays usable after the deferred cancel.
             self::assertSame(200, $handler(new Request('GET', Server::$url), ['timeout' => 5])->wait()->getStatusCode());
@@ -2382,7 +2382,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL progress close.');
                 }
@@ -2392,7 +2392,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertGreaterThan(0, $progressCalls);
             self::assertTrue($closed);
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             try {
                 $promise->wait();
@@ -2441,7 +2441,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL progress close.');
                 }
@@ -2450,7 +2450,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertTrue($closed);
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             try {
                 $promise->wait();
@@ -2495,7 +2495,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL header close.');
                 }
@@ -2504,7 +2504,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertTrue($closed);
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             try {
                 $promise->wait();
@@ -2634,7 +2634,7 @@ class CurlMultiHandlerTest extends TestCase
             self::assertSame(200, $promise->wait()->getStatusCode());
             self::assertTrue($closed);
             self::assertInstanceOf(P\PromiseInterface::class, $spawned);
-            self::assertTrue(P\Is::rejected($spawned));
+            self::assertTrue(P\State::isRejected($spawned));
 
             try {
                 $spawned->wait();
@@ -2722,7 +2722,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for the on_stats close.');
                 }
@@ -2731,7 +2731,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertSame(200, $promise->wait()->getStatusCode());
-            self::assertTrue(P\Is::rejected($delayedPromise));
+            self::assertTrue(P\State::isRejected($delayedPromise));
 
             try {
                 $delayedPromise->wait();
@@ -2776,7 +2776,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($promise)) {
+            while (P\State::isPending($promise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for the on_stats close.');
                 }
@@ -2785,7 +2785,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertSame(200, $promise->wait()->getStatusCode());
-            self::assertTrue(P\Is::rejected($siblingPromise));
+            self::assertTrue(P\State::isRejected($siblingPromise));
 
             try {
                 $siblingPromise->wait();
@@ -2837,7 +2837,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($activePromise)) {
+            while (P\State::isPending($activePromise)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL progress close.');
                 }
@@ -2847,8 +2847,8 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertGreaterThan(0, $progressCalls);
             self::assertTrue($closed);
-            self::assertTrue(P\Is::rejected($activePromise));
-            self::assertTrue(P\Is::rejected($delayedPromise));
+            self::assertTrue(P\State::isRejected($activePromise));
+            self::assertTrue(P\State::isRejected($delayedPromise));
 
             foreach ([[$activePromise, $activeRequest], [$delayedPromise, $delayedRequest]] as [$promise, $request]) {
                 try {
@@ -2873,7 +2873,7 @@ class CurlMultiHandlerTest extends TestCase
         $response = $a(new Request('GET', Server::$url), []);
         $response->wait();
         $response->cancel();
-        self::assertTrue(P\Is::fulfilled($response));
+        self::assertTrue(P\State::isFulfilled($response));
     }
 
     public function testDelaysConcurrently(): void
@@ -2903,7 +2903,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             self::tickUntilSettled($handler, $promise);
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             try {
                 $promise->wait();
@@ -2935,7 +2935,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $deadline = \microtime(true) + 5;
 
-            while (P\Is::pending($bad) || P\Is::pending($good)) {
+            while (P\State::isPending($bad) || P\State::isPending($good)) {
                 if (\microtime(true) >= $deadline) {
                     self::fail('Timed out waiting for cURL multi transfers.');
                 }
@@ -2943,10 +2943,10 @@ class CurlMultiHandlerTest extends TestCase
                 $handler->tick();
             }
 
-            self::assertTrue(P\Is::fulfilled($good));
+            self::assertTrue(P\State::isFulfilled($good));
             self::assertSame(200, $good->wait()->getStatusCode());
 
-            self::assertTrue(P\Is::rejected($bad));
+            self::assertTrue(P\State::isRejected($bad));
             try {
                 $bad->wait();
                 self::fail('Expected RuntimeException');
@@ -2980,7 +2980,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             self::tickUntilSettled($handler, $promise);
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertSame(['release', 'on_stats'], $events);
 
             foreach (['handles', 'delays'] as $map) {
@@ -3048,7 +3048,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertSame(200, $response->getStatusCode());
             self::assertInstanceOf(P\PromiseInterface::class, $nested);
-            self::assertTrue(P\Is::rejected($nested));
+            self::assertTrue(P\State::isRejected($nested));
             self::assertSame([], self::readMultiProperty($handler, 'deferredAdds'));
             self::assertSame([], self::readMultiProperty($handler, 'handles'));
 
@@ -3154,7 +3154,7 @@ class CurlMultiHandlerTest extends TestCase
                 self::markTestSkipped('libcurl did not run a final progress update on premature removal.');
             }
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertTrue(self::readMultiProperty($handler, 'closed'), 'A close deferred from the removal callback must complete once the removal unwinds.');
             self::assertFalse(self::hasMultiHandle($handler));
             self::assertSame([], self::readMultiProperty($handler, 'handles'));
@@ -3214,7 +3214,7 @@ class CurlMultiHandlerTest extends TestCase
             }
 
             self::assertSame([], self::readMultiProperty($handler, 'deferredCancels'), 'A cancel chained from a removal callback must be drained.');
-            self::assertTrue(P\Is::rejected($second));
+            self::assertTrue(P\State::isRejected($second));
         } finally {
             $handler->close();
             Server::flush();
@@ -3281,7 +3281,7 @@ class CurlMultiHandlerTest extends TestCase
             self::assertTrue($secondRemovedDuringFlush, 'The remaining transfer must be removed and disposed before the multi handle closes.');
             self::assertTrue(self::readMultiProperty($handler, 'closed'));
             self::assertFalse(self::hasMultiHandle($handler));
-            self::assertTrue(P\Is::rejected($second));
+            self::assertTrue(P\State::isRejected($second));
         } finally {
             Server::flush();
         }
@@ -3312,9 +3312,9 @@ class CurlMultiHandlerTest extends TestCase
             unset($_SERVER['curl_multi_add_handle_result']);
 
             self::assertSame(200, $response->getStatusCode());
-            self::assertTrue(P\Is::fulfilled($first));
+            self::assertTrue(P\State::isFulfilled($first));
             self::assertSame(299, $first->wait()->getStatusCode());
-            self::assertTrue(P\Is::rejected($second));
+            self::assertTrue(P\State::isRejected($second));
             self::assertSame([], self::readMultiProperty($handler, 'deferredAdds'));
             self::assertSame([], self::readMultiProperty($handler, 'handles'));
 
@@ -3389,7 +3389,7 @@ class CurlMultiHandlerTest extends TestCase
                         ]);
 
                         $deadline = \microtime(true) + 5;
-                        while (P\Is::pending($inner)) {
+                        while (P\State::isPending($inner)) {
                             if (\microtime(true) >= $deadline) {
                                 throw new \RuntimeException('Timed out driving the inner transfer.');
                             }
@@ -3437,7 +3437,7 @@ class CurlMultiHandlerTest extends TestCase
         }
 
         self::assertInstanceOf(P\PromiseInterface::class, $nested);
-        self::assertTrue(P\Is::rejected($nested));
+        self::assertTrue(P\State::isRejected($nested));
         self::assertSame([], self::readMultiProperty($handler, 'deferredAdds'));
         self::assertSame([], self::readMultiProperty($handler, 'handles'));
         self::assertFalse(self::hasMultiHandle($handler));
@@ -3468,7 +3468,7 @@ class CurlMultiHandlerTest extends TestCase
 
             self::assertSame(200, $response->getStatusCode());
             self::assertInstanceOf(P\PromiseInterface::class, $nested);
-            self::assertTrue(P\Is::rejected($nested));
+            self::assertTrue(P\State::isRejected($nested));
             self::assertSame([], self::readMultiProperty($handler, 'deferredAdds'));
             self::assertSame([], self::readMultiProperty($handler, 'deferredCancels'));
             self::assertSame([], self::readMultiProperty($handler, 'handles'));
@@ -3601,7 +3601,7 @@ class CurlMultiHandlerTest extends TestCase
 
             $handler->tick();
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
             self::assertSame([], self::readMultiProperty($handler, 'handles'));
             self::assertSame([], self::readMultiProperty($handler, 'delays'));
 
@@ -3660,7 +3660,7 @@ class CurlMultiHandlerTest extends TestCase
         try {
             $promise->wait(false);
 
-            self::assertTrue(P\Is::rejected($promise));
+            self::assertTrue(P\State::isRejected($promise));
 
             try {
                 $promise->wait();
@@ -4273,11 +4273,11 @@ class CurlMultiHandlerTest extends TestCase
     private static function tickUntilSettled(CurlMultiHandler $handler, P\PromiseInterface $promise): void
     {
         $deadline = \microtime(true) + 5;
-        while (P\Is::pending($promise) && \microtime(true) < $deadline) {
+        while (P\State::isPending($promise) && \microtime(true) < $deadline) {
             $handler->tick();
         }
 
-        self::assertFalse(P\Is::pending($promise), 'Promise was not settled after ticking the handler.');
+        self::assertFalse(P\State::isPending($promise), 'Promise was not settled after ticking the handler.');
     }
 
     private static function progressCallbackOption(): int
@@ -4791,7 +4791,7 @@ class CurlMultiHandlerTest extends TestCase
         self::assertSame('next', (string) $response->getBody());
     }
 
-    public function testTracksEachPendingTransferWithAScopedTaskQueue(): void
+    public function testTracksTheHandlerUntilAllItsTransfersFinish(): void
     {
         Server::flush();
         Server::enqueue([new Response(), new Response()]);
@@ -4804,14 +4804,173 @@ class CurlMultiHandlerTest extends TestCase
             $immediate = $handler(new Request('GET', Server::$url), []);
             $delayed = $handler(new Request('GET', Server::$url), ['delay' => 1]);
 
-            self::assertSame([$immediate, $delayed], $tracked);
+            self::assertCount(1, $tracked);
+            self::assertSame(P\PromiseInterface::PENDING, $tracked[0]->getState());
 
             P\Utils::all([$immediate, $delayed])->wait();
         } finally {
             P\Utils::queue($queue);
         }
 
-        self::assertCount(2, $tracked);
+        self::assertSame(P\PromiseInterface::FULFILLED, $tracked[0]->getState());
+    }
+
+    public function testScopedCleanupRemovesDirectlySettledTransfers(): void
+    {
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+
+        try {
+            $handler = new CurlMultiHandler();
+            $settled = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+            $pending = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+            $response = new Response();
+            $settled->resolve($response);
+
+            $tracked[0]->cancel();
+            P\Utils::queue()->run();
+
+            self::assertSame([], self::readMultiProperty($handler, 'handles'));
+            self::assertSame($response, $settled->wait());
+            self::assertSame(P\PromiseInterface::REJECTED, $pending->getState());
+            self::assertSame(P\PromiseInterface::FULFILLED, $tracked[0]->getState());
+
+            $next = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+            self::assertCount(2, $tracked);
+            $tracked[1]->cancel();
+            self::assertSame(P\PromiseInterface::REJECTED, $next->getState());
+        } finally {
+            P\Utils::queue($queue);
+        }
+    }
+
+    public function testScopedCleanupCancelsTransfersCreatedDuringRemoval(): void
+    {
+        Server::enqueue([new Response(200, ['Content-Length' => '1048576'], \str_repeat('x', 1048576))]);
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+        $handler = new CurlMultiHandler(['select_timeout' => 0]);
+        $finishing = false;
+        $nested = null;
+
+        try {
+            $handler(new Request('GET', Server::$url), [
+                'timeout' => 5,
+                'progress' => static function () use ($handler, &$finishing, &$nested): void {
+                    if ($finishing && $nested === null) {
+                        $nested = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+                    }
+                },
+            ]);
+
+            $deadline = \microtime(true) + 5;
+            while (self::readMultiProperty($handler, 'active') === 0) {
+                if (\microtime(true) >= $deadline) {
+                    self::fail('Timed out waiting for the transfer to start.');
+                }
+                $handler->tick();
+            }
+
+            $finishing = true;
+            $tracked[0]->cancel();
+            P\Utils::queue()->run();
+
+            if ($nested === null) {
+                self::markTestSkipped('libcurl did not run a final progress update on premature removal.');
+            }
+
+            self::assertTrue(P\State::isRejected($nested));
+            self::assertSame([], self::readMultiProperty($handler, 'handles'));
+            self::assertTrue(P\State::isFulfilled($tracked[0]));
+            self::assertCount(1, $tracked);
+        } finally {
+            $finishing = false;
+            $handler->close();
+            P\Utils::queue($queue);
+            Server::flush();
+        }
+    }
+
+    /**
+     * @dataProvider responsePromiseStates
+     */
+    public function testScopedCleanupFinishesSiblingsAfterARemovalCallbackThrows(bool $settled): void
+    {
+        Server::enqueue([new Response(200, ['Content-Length' => '1048576'], \str_repeat('x', 1048576))]);
+        $tracked = [];
+        $queue = P\Utils::queue();
+        P\Utils::queue(self::trackingTaskQueue($tracked));
+        $finishing = false;
+        $called = false;
+        $failure = new \RuntimeException('removal callback failed');
+        // A custom factory can install native callbacks that throw directly.
+        $factory = $this->createMock(CurlFactoryInterface::class);
+        $factory->method('create')->willReturnCallback(static function (RequestInterface $request, array $options) use (&$finishing, &$called, $failure): EasyHandle {
+            $easy = (new CurlFactory(0))->create($request, $options);
+            \curl_setopt($easy->handle, \CURLOPT_NOPROGRESS, false);
+            \curl_setopt($easy->handle, \CURLOPT_PROGRESSFUNCTION, static function () use (&$finishing, &$called, $failure): int {
+                if ($finishing) {
+                    $called = true;
+                    throw $failure;
+                }
+
+                return 0;
+            });
+
+            return $easy;
+        });
+        $handler = new CurlMultiHandler(['select_timeout' => 0, 'handle_factory' => $factory]);
+
+        try {
+            $promise = $handler(new Request('GET', Server::$url), ['timeout' => 5]);
+            $sibling = $handler(new Request('GET', Server::$url), ['delay' => 60000]);
+            $deadline = \microtime(true) + 5;
+            while (self::readMultiProperty($handler, 'active') === 0) {
+                if (\microtime(true) >= $deadline) {
+                    self::fail('Timed out waiting for the transfer to start.');
+                }
+                $handler->tick();
+            }
+            if ($settled) {
+                $promise->resolve(new Response(204));
+            }
+
+            $finishing = true;
+            $tracked[0]->cancel();
+            $caught = null;
+            try {
+                P\Utils::queue()->run();
+            } catch (\RuntimeException $e) {
+                $caught = $e;
+            }
+
+            if (!$called) {
+                self::markTestSkipped('libcurl did not run a final progress update on premature removal.');
+            }
+
+            if ($settled) {
+                self::assertSame($failure, $caught);
+            } else {
+                self::assertNull($caught);
+                self::assertSame($failure, P\Utils::inspect($promise)['reason']);
+            }
+            self::assertTrue(P\State::isRejected($sibling));
+            self::assertSame([], self::readMultiProperty($handler, 'handles'));
+            self::assertTrue(P\State::isFulfilled($tracked[0]));
+        } finally {
+            $finishing = false;
+            $handler->close();
+            P\Utils::queue($queue);
+            Server::flush();
+        }
+    }
+
+    public static function responsePromiseStates(): iterable
+    {
+        yield 'settled' => [true];
+        yield 'pending' => [false];
     }
 
     public function testDoesNotTrackATransferThatFailedToStart(): void

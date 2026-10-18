@@ -176,7 +176,7 @@ final class StreamHandler
 
         // Sleep if there is a delay specified.
         if (isset($options['delay'])) {
-            \usleep((int) ($options['delay'] * 1000));
+            Clock::sleep((int) ($options['delay'] * 1000));
         }
 
         $multiplex = $options['multiplex'] ?? null;
@@ -394,6 +394,7 @@ final class StreamHandler
         #[\SensitiveParameter]
         array $options,
         $stream,
+        #[\SensitiveParameter]
         array $hdrs,
         ?float $startTime,
         ?float $deadline
@@ -407,8 +408,10 @@ final class StreamHandler
         $canHaveBody = HeaderProcessor::responseCanHaveBody($request->getMethod(), $status);
         $framingFailure = null;
         $declaredLength = null;
+        $chunked = false;
         try {
             $declaredLength = HeaderProcessor::validateResponseFraming($request->getMethod(), $status, $headers);
+            $chunked = $canHaveBody && HeaderProcessor::parseTransferEncoding($headers);
             if (empty($options['stream'])) {
                 HeaderProcessor::assertContentLengthWithinPlatformLimit($declaredLength);
             }
@@ -416,47 +419,39 @@ final class StreamHandler
             $framingFailure = $e;
         }
 
-        $filtered = false;
-        $decodeContent = false;
-        $streaming = !empty($options['stream']);
-        if ($framingFailure === null) {
-            try {
-                [$headers, $filtered] = $this->decodeChunkedResponse($headers, $stream, $canHaveBody);
-                [$headers, $decodeContent] = self::decodeContentHeaders($options, $headers);
-                if ($streaming && $canHaveBody && $decodeContent) {
-                    // Decode on the transport itself so a blocking read of one
-                    // decoded byte cannot trigger a larger blocking source read.
-                    $this->createResource(static function () use ($stream) {
-                        return \stream_filter_append($stream, 'zlib.inflate', \STREAM_FILTER_READ, ['window' => 15 + 32]);
-                    });
-                    $filtered = true;
-                }
-            } catch (\RuntimeException $e) {
-                $framingFailure = $e;
-            }
+        if ($chunked) {
+            HeaderProcessor::removeHeader('Transfer-Encoding', $headers);
+        } elseif (!$canHaveBody) {
+            $headers = self::removeChunkedTransferCoding($headers);
         }
 
         $streamFactory = self::requireStreamFactory($options[RequestOptions::STREAM_FACTORY] ?? new Psr7\HttpFactory());
         $responseFactory = self::requireResponseFactory($options[RequestOptions::RESPONSE_FACTORY] ?? new Psr7\HttpFactory());
 
+        // Wrap the transport resource with the configured stream factory, and
+        // decorate buffered transfers with the deadline source before framing
+        // and optional content decoding layer on top, so every read that pulls
+        // from the transport observes the deadline.
         $resource = $stream;
         $stream = $streamFactory->createStreamFromResource($stream);
-        // Keep the deadline source below buffered content decoding so every
-        // transport read made by InflateStream observes the remaining budget.
-        if ($framingFailure === null && $deadline !== null && !$streaming) {
+        if ($framingFailure === null && $deadline !== null && empty($options['stream'])) {
             $stream = self::createDeadlineSource($stream, $resource, $deadline, $options);
+        }
+        if ($chunked || !empty($options['stream'])) {
+            $stream = new TransportStream($stream);
+        }
+        if ($chunked) {
+            $stream = new ChunkedBodyStream($stream);
+        } elseif (!empty($options['stream'])) {
+            $length = HeaderProcessor::contentLengthToInt($declaredLength);
+            if ($length !== null) {
+                $stream = new DeclaredLengthStream($stream, $length);
+            }
         }
 
         $encodedBody = null;
-        if ($framingFailure === null && !$streaming && $decodeContent) {
-            if ($declaredLength !== null && $declaredLength !== '0') {
-                $encodedBody = new EncodedBodyStream($stream, $declaredLength);
-                $stream = $encodedBody;
-            }
-            $stream = new Psr7\InflateStream($stream);
-        }
-        if ($framingFailure === null && $streaming && $filtered) {
-            $stream = new IncrementalStream($stream, $resource);
+        if ($framingFailure === null) {
+            [$stream, $headers, $encodedBody] = self::checkDecode($options, $headers, $stream, $declaredLength);
         }
 
         $sink = $framingFailure !== null || !$canHaveBody
@@ -649,21 +644,15 @@ final class StreamHandler
     }
 
     /**
-     * Applies the HTTP wrapper's normal chunked-response handling.
+     * Removes Transfer-Encoding values that start with chunked from a response
+     * that cannot have a body, as PHP's HTTP wrapper did.
      *
      * @param array<string, string[]> $headers
-     * @param resource                $stream
-     * @param bool                    $decodeBody Whether to attach the dechunk filter
      *
-     * @return array{0: array<string, string[]>, 1: bool}
-     *
-     * @throws \RuntimeException when the dechunk filter cannot be attached
+     * @return array<string, string[]>
      */
-    private function decodeChunkedResponse(array $headers, $stream, bool $decodeBody): array
+    private static function removeChunkedTransferCoding(array $headers): array
     {
-        $decodedHeaders = $headers;
-        $decode = false;
-
         foreach ($headers as $name => $values) {
             if (!Psr7\Utils::caselessEquals((string) $name, 'Transfer-Encoding')) {
                 continue;
@@ -671,49 +660,45 @@ final class StreamHandler
 
             $remaining = [];
             foreach ($values as $value) {
-                // Match PHP's legacy auto_decode prefix check so moving the
-                // filter does not change which responses are dechunked.
-                if (Psr7\Utils::caselessEquals(\substr($value, 0, 7), 'chunked')) {
-                    $decode = true;
-                } else {
+                if (!Psr7\Utils::caselessEquals(\substr($value, 0, 7), 'chunked')) {
                     $remaining[] = $value;
                 }
             }
 
             if ($remaining === []) {
-                unset($decodedHeaders[$name]);
+                unset($headers[$name]);
             } else {
-                $decodedHeaders[$name] = $remaining;
+                $headers[$name] = $remaining;
             }
         }
 
-        if (!$decode) {
-            return [$headers, false];
-        }
-
-        if ($decodeBody) {
-            $this->createResource(static function () use ($stream) {
-                return \stream_filter_append($stream, 'dechunk', \STREAM_FILTER_READ);
-            });
-        }
-
-        return [$decodedHeaders, $decodeBody];
+        return $headers;
     }
 
     /**
-     * @return array{0: array, 1: bool}
+     * @return array{0: StreamInterface, 1: array, 2: ?EncodedBodyStream}
      */
-    private static function decodeContentHeaders(
+    private static function checkDecode(
         #[\SensitiveParameter]
         array $options,
-        array $headers
+        array $headers,
+        StreamInterface $stream,
+        ?string $declaredLength
     ): array {
+        $encodedBody = null;
+
         // Automatically decode responses when instructed.
         if (isset($options['decode_content']) && $options['decode_content'] !== false) {
             $normalizedKeys = Utils::normalizeHeaderKeys($headers);
             if (isset($normalizedKeys['content-encoding'])) {
                 $encoding = $headers[$normalizedKeys['content-encoding']];
                 if ($encoding[0] === 'gzip' || $encoding[0] === 'deflate') {
+                    if (empty($options['stream']) && $declaredLength !== null && $declaredLength !== '0') {
+                        $encodedBody = new EncodedBodyStream($stream, $declaredLength);
+                        $stream = $encodedBody;
+                    }
+
+                    $stream = new InflateBodyStream($stream, $encoding[0] === 'deflate');
                     $headers['x-encoded-content-encoding'] = $headers[$normalizedKeys['content-encoding']];
 
                     // Remove content-encoding header
@@ -726,13 +711,11 @@ final class StreamHandler
                     if ($encodedContentLength !== []) {
                         $headers['x-encoded-content-length'] = $encodedContentLength;
                     }
-
-                    return [$headers, true];
                 }
             }
         }
 
-        return [$headers, false];
+        return [$stream, $headers, $encodedBody];
     }
 
     /**
@@ -753,7 +736,6 @@ final class StreamHandler
         try {
             // Buffered paths reject unrepresentable lengths before draining.
             $declaredLength = HeaderProcessor::contentLengthToInt($declaredResponseBodyLength);
-            $declaredLength = $declaredLength !== null && $declaredLength > 0 ? $declaredLength : null;
             $copyLimit = $encodedBody === null ? $declaredLength ?? -1 : -1;
 
             try {
@@ -865,12 +847,11 @@ final class StreamHandler
 
     /**
      * Decorates the transport stream so each buffered-body read observes the
-     * remaining wall-clock budget of the "timeout" request option, bounded
-     * by the "read_timeout" idle timeout when that is shorter. The transport
-     * is switched to non-blocking mode because filtered reads (chunked and
-     * compressed responses) otherwise block until a full buffer arrives,
-     * which would keep the deadline from being enforced between small pieces
-     * of data.
+     * remaining wall-clock budget of the "timeout" request option, bounded by
+     * the "read_timeout" idle timeout when that is shorter. The transport is
+     * switched to non-blocking mode because a blocking read waits for data up
+     * to the transport's own timeout, which would keep the deadline from being
+     * enforced while the server stalls.
      *
      * @param resource $resource
      */

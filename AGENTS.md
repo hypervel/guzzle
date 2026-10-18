@@ -91,6 +91,13 @@ sections of the README and `UPGRADING.md` describe the fork; the rest of
 
 - Keep fork changes minimal and in upstream's style so upstream updates merge
   cleanly.
+- Incorporate useful, non-breaking upstream changes into the current fork
+  branch, including changes from unreleased upstream branches. Publish these
+  using the current upstream version plus an incremented fork release number.
+  When upstream tags a newer release, merge and reconcile its changes, run the
+  checks, then advance the fork's branch and publish a matching fork release.
+  Routine updates need no further approval; breaking changes require owner
+  approval.
 - Land changes, including upstream syncs, through a pull request from a work
   branch into the tracked branch, and merge with a merge commit, never a squash
   or rebase. With the owner's approval, a trivial fix that needs no review may
@@ -105,15 +112,15 @@ sections of the README and `UPGRADING.md` describe the fork; the rest of
   section and the GitHub release notes, and document required migration steps in
   the fork section of `UPGRADING.md`. `CHANGELOG.md` stays upstream's, which
   overrides the changelog rule above for fork-only changes.
-- PHP 7.4 syntax is retained for the static tools; the fork's runtime
-  requirements are defined in `composer.json`. Run PHPUnit under PHP 8.4 or
-  newer with Swoole, as CI does in the `ghcr.io/hypervel/components-ci` image.
-  Run PHPStan and PHP-CS-Fixer under PHP 7.4 as above, setting
-  `COMPOSER_IGNORE_PLATFORM_REQ=php,ext-swoole` only when installing the root
-  package.
-- Regenerate `phpstan-baseline.neon` under PHP 7.4 with
-  `make static-phpstan-update-baseline`, using the same variable, whenever an
-  upstream merge conflicts in it.
+- The inherited PHP 7.4 tooling and compatibility requirements do not apply;
+  runtime requirements are defined in `composer.json`. Run static tools under
+  PHP 8.4 with Swoole installed, and tests under the PHP versions in CI with
+  Swoole. CI uses the `ghcr.io/hypervel/components-ci` image. Preserve upstream's
+  source style and formatting, including attribute placement and parameter
+  commas; avoid unrelated syntax modernization.
+- Regenerate `phpstan-baseline.neon` with
+  `make static-phpstan-update-baseline` whenever an upstream merge conflicts in
+  it. Investigate new errors before accepting baseline changes.
 - Sync upstream on a work branch with `git merge upstream/<branch>`, never a
   rebase, and keep the fork's intentional behavior when resolving conflicts.
   When upstream merges a pull request the fork already carries, reconcile the

@@ -28,6 +28,11 @@ PHP process. A cURL multi handler that one coroutine is driving must not be
 driven by another, and framework integrations need to see the requests of every
 Guzzle client, including clients that SDKs create. This fork adds:
 
+- **Shared asynchronous clients.** The default handler leases a cURL multi
+  handler to each coroutine while it has work, then returns it to a pool for
+  reuse. It keeps up to 64 idle handlers; `max_idle_multi_handlers` changes this
+  limit without limiting active requests. See
+  [Coroutine Handlers](docs/handlers.md#coroutine-handlers).
 - **Multi handler ownership.** A `CurlMultiHandler` with pending work belongs to
   the coroutine driving it. Until the handler is idle, other coroutines can't
   send requests through it, tick, run or close it, or wait on or cancel its
@@ -36,8 +41,9 @@ Guzzle client, including clients that SDKs create. This fork adds:
 - **Transfer tracking.** When the promise task queue implements
   `ScopedTaskQueueInterface` from
   [`hypervel/guzzle-promises`](https://github.com/hypervel/guzzle-promises), the
-  multi handler passes each pending transfer to it, so the queue can cancel
-  transfers that a coroutine leaves unfinished when it ends.
+  multi handler tracks its pending native work, so the queue can cancel
+  transfers that a coroutine leaves unfinished when it ends, including those
+  whose response promises were settled directly.
 - **Global middleware.** `Client::pushGlobalMiddleware()` and
   `Client::removeGlobalMiddleware()` manage named middleware that wraps the
   transfers of every client in the process. See
@@ -47,17 +53,10 @@ Guzzle client, including clients that SDKs create. This fork adds:
   and each easy handle has its own connection cache, so with 3 most concurrent
   requests would open new connections. `CurlMultiHandler` keeps its default of
   50. See [Idle cURL Handles](docs/handlers.md#idle-curl-handles).
-- **Upstream pull requests.** The fork includes these changes from upstream pull
-  requests:
-  - [#3934](https://github.com/guzzle/guzzle/pull/3934): keeps `StreamHandler`
-    deadlines local to each request.
-  - [#3935](https://github.com/guzzle/guzzle/pull/3935): adds the
-    `max_idle_handles` option for the cURL handlers.
-  - [#3936](https://github.com/guzzle/guzzle/pull/3936): returns available bytes
-    from filtered streamed responses instead of waiting for a full buffer.
-  - [#3937](https://github.com/guzzle/guzzle/pull/3937): reads `StreamHandler`
-    response headers from the opened stream, which also fixes the stream handler
-    under Swoole on PHP 8.4 and newer.
+- **Upstream pull requests.** The fork includes
+  [#3935](https://github.com/guzzle/guzzle/pull/3935), which adds the
+  `max_idle_handles` option for the cURL handlers. Stream handling fixes use
+  upstream's implementations.
 
 > [!IMPORTANT]
 > This fork keeps upstream's public API. Once installed, it replaces

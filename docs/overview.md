@@ -30,7 +30,7 @@ curl -sS https://getcomposer.org/installer | php
 You can add Guzzle as a dependency using Composer:
 
 ```bash
-composer require hypervel/guzzle:^8.2
+composer require hypervel/guzzle:^8.3
 ```
 
 Alternatively, you can specify Guzzle as a dependency in your project's existing
@@ -39,7 +39,7 @@ composer.json file:
 ```js
 {
   "require": {
-     "hypervel/guzzle": "^8.2"
+     "hypervel/guzzle": "^8.3"
   }
 }
 ```
@@ -66,9 +66,8 @@ what changed between the major versions.
 1.  Guzzle utilizes PSR-1, PSR-2, PSR-4, and PSR-7.
 2.  Guzzle is meant to be lean and fast with very few dependencies. This means
     that not every feature request will be accepted.
-3.  Guzzle's code uses PHP 7.4-compatible syntax so its static analysis tools
-    can run on PHP 7.4. At runtime, this fork requires PHP 8.4 or newer and the
-    Swoole extension.
+3.  Run static tools under PHP 8.4 with Swoole installed, and tests under the
+    PHP versions in CI with Swoole. Keep upstream's source style and formatting.
 4.  All pull requests must include unit tests to ensure the change works as
     expected and to prevent regressions.
 

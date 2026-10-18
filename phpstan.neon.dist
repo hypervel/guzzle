@@ -11,3 +11,5 @@ parameters:
         - src
     bootstrapFiles:
       - tests/bootstrap-phpstan.php
+    stubFiles:
+      - tests/swoole-phpstan.stub
