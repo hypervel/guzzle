@@ -173,17 +173,6 @@ class CurlHandlerTest extends TestCase
         self::assertInstanceOf(FulfilledPromise::class, $a($request, []));
     }
 
-    public function testClosePreventsReuse(): void
-    {
-        $handler = new CurlHandler();
-        $handler->close();
-
-        $this->expectException(\BadMethodCallException::class);
-        $this->expectExceptionMessage('Cannot use the cURL handler after it has been closed.');
-
-        $handler(new Request('GET', Server::$url), []);
-    }
-
     /**
      * @dataProvider maxIdleHandlesProvider
      */
@@ -195,27 +184,44 @@ class CurlHandlerTest extends TestCase
 
         $handler = new CurlHandler($options);
         $factory = self::readFactory($handler);
-        $handles = [];
+        $easyHandles = [];
         for ($i = 0; $i <= $expected; ++$i) {
-            $handles[] = $factory->create(new Request('GET', Server::$url), []);
+            $easyHandles[] = $factory->create(new Request('GET', Server::$url), []);
         }
 
-        foreach ($handles as $handle) {
-            $factory->release($handle);
+        foreach ($easyHandles as $easy) {
+            $factory->release($easy);
         }
 
         self::assertCount($expected, self::readIdleHandles($factory));
     }
 
-    public static function maxIdleHandlesProvider(): array
+    public static function maxIdleHandlesProvider(): iterable
     {
-        return [
-            'default' => [[], 256],
-            'null' => [['max_idle_handles' => null], 256],
-            'disabled' => [['max_idle_handles' => 0], 0],
-            'increased' => [['max_idle_handles' => 257], 257],
-            'shared' => [['max_idle_handles' => 4, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 4],
-        ];
+        yield 'default' => [[], 256];
+        yield 'null' => [['max_idle_handles' => null], 256];
+        yield 'disabled' => [['max_idle_handles' => 0], 0];
+        yield 'increased' => [['max_idle_handles' => 257], 257];
+        yield 'shared' => [['max_idle_handles' => 4, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 4];
+    }
+
+    public function testClosePreventsReuse(): void
+    {
+        $handler = new CurlHandler();
+        $handler->close();
+
+        $this->expectException(\BadMethodCallException::class);
+        $this->expectExceptionMessage('Cannot use the cURL handler after it has been closed.');
+
+        $handler(new Request('GET', Server::$url), []);
+    }
+
+    public function testRejectsUnknownConstructorOption(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Invalid CurlHandler constructor option "unknown".');
+
+        new CurlHandler(['unknown' => true]);
     }
 
     /**
@@ -231,28 +237,11 @@ class CurlHandlerTest extends TestCase
         new CurlHandler(['max_idle_handles' => $value]);
     }
 
-    public static function invalidMaxIdleHandlesProvider(): array
+    public static function invalidMaxIdleHandlesProvider(): iterable
     {
-        return [[-1], ['4']];
-    }
-
-    public function testMaxIdleHandlesCannotBeUsedWithCustomFactory(): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The "max_idle_handles" option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
-
-        new CurlHandler([
-            'max_idle_handles' => 0,
-            'handle_factory' => new CurlFactory(3),
-        ]);
-    }
-
-    public function testRejectsUnknownConstructorOption(): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('Invalid CurlHandler constructor option "unknown".');
-
-        new CurlHandler(['unknown' => true]);
+        yield 'negative' => [-1];
+        yield 'float' => [1.0];
+        yield 'string' => ['1'];
     }
 
     public function testCloseClosesInternallyCreatedFactory(): void
@@ -434,6 +423,27 @@ class CurlHandlerTest extends TestCase
         self::assertInstanceOf(CurlHandler::class, $handler);
     }
 
+    public function testMaxIdleHandlesCannotBeUsedWithCustomFactory(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The "max_idle_handles" CurlHandler option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
+
+        new CurlHandler([
+            'handle_factory' => new CurlFactory(0),
+            'max_idle_handles' => 4,
+        ]);
+    }
+
+    public function testNullMaxIdleHandlesCanBeUsedWithCustomFactory(): void
+    {
+        $handler = new CurlHandler([
+            'handle_factory' => new CurlFactory(0),
+            'max_idle_handles' => null,
+        ]);
+
+        self::assertInstanceOf(CurlHandler::class, $handler);
+    }
+
     public function testCloseReleasesShareHandleState(): void
     {
         self::skipIfCurlShareIsUnavailable();
@@ -493,15 +503,6 @@ class CurlHandlerTest extends TestCase
         yield 'coding after chunked' => ['chunked, gzip', 'Invalid Transfer-Encoding response header: chunked is not the final transfer coding'];
     }
 
-    private static function readIdleHandles(CurlFactory $factory): array
-    {
-        $readHandles = \Closure::bind(static function (CurlFactory $factory): array {
-            return $factory->handles;
-        }, null, CurlFactory::class);
-
-        return $readHandles($factory);
-    }
-
     private static function readFactory(CurlHandler $handler): CurlFactory
     {
         $readFactory = \Closure::bind(static function (CurlHandler $handler): CurlFactory {
@@ -512,6 +513,15 @@ class CurlHandlerTest extends TestCase
         self::assertInstanceOf(CurlFactory::class, $factory);
 
         return $factory;
+    }
+
+    private static function readIdleHandles(CurlFactory $factory): array
+    {
+        $readIdleHandles = \Closure::bind(static function (CurlFactory $factory): array {
+            return $factory->handles;
+        }, null, CurlFactory::class);
+
+        return $readIdleHandles($factory);
     }
 
     private static function readShareHandleState(CurlHandler $handler): ?CurlShareHandleState

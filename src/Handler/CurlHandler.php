@@ -42,8 +42,7 @@ final class CurlHandler
      *
      * - handle_factory: Optional curl factory used to create cURL handles.
      * - max_idle_handles: Optional maximum number of idle cURL easy handles.
-     *   Accepts a non-negative integer or null. Zero disables idle handle
-     *   retention; null or omission keeps the default of 256.
+     *   Zero disables retention; null or omission keeps the default of 256.
      * - transport_sharing: Optional transport sharing mode.
      *
      * @param array{handle_factory?: ?CurlFactoryInterface, max_idle_handles?: mixed, transport_sharing?: mixed} $options Array of options to use with the handler
@@ -56,19 +55,20 @@ final class CurlHandler
             }
         }
 
-        $maxIdleHandles = $options['max_idle_handles'] ?? 256;
-        if (!\is_int($maxIdleHandles) || $maxIdleHandles < 0) {
-            throw new InvalidArgumentException('max_idle_handles must be a non-negative integer.');
-        }
-        if (isset($options['max_idle_handles'], $options['handle_factory'])) {
-            throw new InvalidArgumentException('The "max_idle_handles" option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
-        }
-
         CurlShareHandleState::assertNoRequiredSharingCustomFactoryConflict($options, 'CurlHandler');
         $transportSharing = $options['transport_sharing'] ?? null;
         $sharingMode = CurlShareHandleState::normalizeMode($transportSharing, 'transport_sharing');
 
+        $maxIdleHandles = $options['max_idle_handles'] ?? 256;
+        if (!\is_int($maxIdleHandles) || $maxIdleHandles < 0) {
+            throw new InvalidArgumentException('max_idle_handles must be a non-negative integer.');
+        }
+
         if (\array_key_exists('handle_factory', $options) && $options['handle_factory'] !== null) {
+            if (isset($options['max_idle_handles'])) {
+                throw new InvalidArgumentException('The "max_idle_handles" CurlHandler option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
+            }
+
             $this->shareHandleState = null;
             $this->factory = $options['handle_factory'];
             $this->ownsFactory = false;

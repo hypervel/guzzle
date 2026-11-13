@@ -69,6 +69,37 @@ system.
 > have a cookie middleware associated with a client, then setting the `cookies`
 > request option will have no effect on the request.
 
+### Default Handler Factory
+
+`GuzzleHttp\Utils::setDefaultHandlerFactory()` sets a factory that creates the
+default handler in place of the built-in selection. The factory receives the
+handler options and a callable that returns the handler Guzzle would have
+chosen:
+
+```php
+use GuzzleHttp\Middleware;
+use GuzzleHttp\Utils;
+use Psr\Http\Message\RequestInterface;
+
+$factory = function (array $handlerOptions, callable $default): callable {
+    $addHeader = Middleware::mapRequest(function (RequestInterface $request) {
+        return $request->withHeader('X-Foo', 'bar');
+    });
+
+    return $addHeader($default());
+};
+
+Utils::setDefaultHandlerFactory($factory);
+```
+
+The factory is consulted each time a default handler is chosen, after the
+handler options have been checked for type and value. Clients that already exist
+keep their handler, and a handler provided explicitly never reaches the factory.
+Passing null restores the built-in selection.
+
+The factory is process-wide, so set it from application bootstrap code, not from
+a library.
+
 ### PSR-17 Factories
 
 The PSR-17 factory request options are owned by different layers:
@@ -102,10 +133,9 @@ custom handlers are responsible for honoring these options themselves.
 ### Idle cURL Handles
 
 `max_idle_handles` (int|null): Maximum number of idle cURL easy handles retained
-by each default cURL handler. Accepts a non-negative integer or null. Zero
-disables idle handle retention; null or omission keeps the defaults of 256 for
-`CurlHandler` and 50 for `CurlMultiHandler`. This setting does not affect the
-stream handler.
+by each default cURL handler. Zero disables retention; null or omission keeps
+the defaults of 256 for `CurlHandler` and 50 for `CurlMultiHandler`. This
+setting does not affect the stream handler.
 
 Pass this option to the client constructor when Guzzle creates the default
 handler:
@@ -118,23 +148,24 @@ $client = new Client([
 ]);
 ```
 
-One value applies separately to each cURL handler Guzzle creates. In this
-example, both the synchronous and asynchronous handlers retain at most 64 idle
-easy handles each. Handles are created as requests need them, not allocated in
-advance.
+In this example, the synchronous and asynchronous handlers each retain at most
+64 idle easy handles. Handles are created as requests need them, not allocated
+in advance.
 
-Keeping more idle easy handles can improve reuse after concurrent requests,
-particularly when a coroutine runtime allows synchronous requests to overlap. It
-also retains more native resources. This is not a limit on active requests or
-network connections: a synchronous easy handle can cache connections to several
-origins, and `CurlMultiHandler` has its own connection cache separate from its
-idle easy handles.
+Retaining more idle handles can improve connection reuse when synchronous
+requests overlap, such as under a coroutine runtime, at the cost of more native
+resources. It does not limit active requests or network connections: a
+synchronous easy handle can cache connections to several origins, and
+`CurlMultiHandler` has its own connection cache separate from its idle easy
+handles. A handle released into a full pool is closed with the connections it
+holds, so zero makes every synchronous request open a new connection unless
+persistent transport sharing pools connections, while `CurlMultiHandler` keeps
+reusing them through its multi handle.
 
 The option is also accepted by `GuzzleHttp\Utils::chooseHandler()` and the
 `CurlHandler` and `CurlMultiHandler` constructors. A non-null value cannot be
-combined with a custom client handler or a custom `handle_factory`: configure
-the option on the custom handler's constructor, or retention on the custom
-factory, instead.
+combined with a custom client handler or a custom `handle_factory`; configure
+the cURL handler or the factory instead.
 
 ### Closing cURL Handlers
 

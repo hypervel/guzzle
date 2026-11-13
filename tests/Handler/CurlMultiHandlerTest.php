@@ -963,69 +963,6 @@ class CurlMultiHandlerTest extends TestCase
         $a($request, []);
     }
 
-    /**
-     * @dataProvider maxIdleHandlesProvider
-     */
-    public function testMaxIdleHandlesControlsRetention(array $options, int $expected): void
-    {
-        if (isset($options['transport_sharing'])) {
-            self::skipIfCurlShareIsUnavailable();
-        }
-
-        $handler = new CurlMultiHandler($options);
-        $factory = self::readFactory($handler);
-        $handles = [];
-        for ($i = 0; $i <= $expected; ++$i) {
-            $handles[] = $factory->create(new Request('GET', Server::$url), []);
-        }
-
-        foreach ($handles as $handle) {
-            $factory->release($handle);
-        }
-
-        self::assertCount($expected, self::readIdleHandles($factory));
-    }
-
-    public static function maxIdleHandlesProvider(): array
-    {
-        return [
-            'default' => [[], 50],
-            'null' => [['max_idle_handles' => null], 50],
-            'disabled' => [['max_idle_handles' => 0], 0],
-            'increased' => [['max_idle_handles' => 51], 51],
-            'shared' => [['max_idle_handles' => 51, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 51],
-        ];
-    }
-
-    /**
-     * @dataProvider invalidMaxIdleHandlesProvider
-     *
-     * @param mixed $value
-     */
-    public function testRejectsInvalidMaxIdleHandles($value): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
-
-        new CurlMultiHandler(['max_idle_handles' => $value]);
-    }
-
-    public static function invalidMaxIdleHandlesProvider(): array
-    {
-        return [[-1], ['4']];
-    }
-
-    public function testMaxIdleHandlesCannotBeUsedWithCustomFactory(): void
-    {
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The "max_idle_handles" option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
-
-        new CurlMultiHandler([
-            'max_idle_handles' => 0,
-            'handle_factory' => new CurlFactory(3),
-        ]);
-    }
-
     public function testRejectsUnknownConstructorOption(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -1627,6 +1564,58 @@ class CurlMultiHandlerTest extends TestCase
         yield 'positive sub-millisecond' => [0.0005];
     }
 
+    /**
+     * @dataProvider maxIdleHandlesProvider
+     */
+    public function testMaxIdleHandlesControlsRetention(array $options, int $expected): void
+    {
+        if (isset($options['transport_sharing'])) {
+            self::skipIfCurlShareIsUnavailable();
+        }
+
+        $handler = new CurlMultiHandler($options);
+        $factory = self::readFactory($handler);
+        $easyHandles = [];
+        for ($i = 0; $i <= $expected; ++$i) {
+            $easyHandles[] = $factory->create(new Request('GET', Server::$url), []);
+        }
+
+        foreach ($easyHandles as $easy) {
+            $factory->release($easy);
+        }
+
+        self::assertCount($expected, self::readIdleHandles($factory));
+    }
+
+    public static function maxIdleHandlesProvider(): iterable
+    {
+        yield 'default' => [[], 50];
+        yield 'null' => [['max_idle_handles' => null], 50];
+        yield 'disabled' => [['max_idle_handles' => 0], 0];
+        yield 'increased' => [['max_idle_handles' => 51], 51];
+        yield 'shared' => [['max_idle_handles' => 51, 'transport_sharing' => TransportSharing::HANDLER_PREFER], 51];
+    }
+
+    /**
+     * @dataProvider invalidMaxIdleHandlesProvider
+     *
+     * @param mixed $value
+     */
+    public function testRejectsInvalidMaxIdleHandles($value): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
+
+        new CurlMultiHandler(['max_idle_handles' => $value]);
+    }
+
+    public static function invalidMaxIdleHandlesProvider(): iterable
+    {
+        yield 'negative' => [-1];
+        yield 'float' => [1.0];
+        yield 'string' => ['1'];
+    }
+
     public function testTransportSharingOptionAppliesCurlShare(): void
     {
         self::skipIfCurlShareIsUnavailable();
@@ -1920,6 +1909,27 @@ class CurlMultiHandlerTest extends TestCase
         $handler = new CurlMultiHandler([
             'handle_factory' => new CurlFactory(0),
             'transport_sharing' => TransportSharing::NONE,
+        ]);
+
+        self::assertInstanceOf(CurlMultiHandler::class, $handler);
+    }
+
+    public function testMaxIdleHandlesCannotBeUsedWithCustomFactory(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The "max_idle_handles" CurlMultiHandler option cannot be combined with a custom "handle_factory". Configure idle handle retention on the factory instead.');
+
+        new CurlMultiHandler([
+            'handle_factory' => new CurlFactory(0),
+            'max_idle_handles' => 51,
+        ]);
+    }
+
+    public function testNullMaxIdleHandlesCanBeUsedWithCustomFactory(): void
+    {
+        $handler = new CurlMultiHandler([
+            'handle_factory' => new CurlFactory(0),
+            'max_idle_handles' => null,
         ]);
 
         self::assertInstanceOf(CurlMultiHandler::class, $handler);
@@ -4211,15 +4221,6 @@ class CurlMultiHandlerTest extends TestCase
         return $hasMultiHandle($handler);
     }
 
-    private static function readIdleHandles(CurlFactory $factory): array
-    {
-        $readHandles = \Closure::bind(static function (CurlFactory $factory): array {
-            return $factory->handles;
-        }, null, CurlFactory::class);
-
-        return $readHandles($factory);
-    }
-
     private static function readFactory(CurlMultiHandler $handler): CurlFactory
     {
         $readFactory = \Closure::bind(static function (CurlMultiHandler $handler): CurlFactory {
@@ -4230,6 +4231,15 @@ class CurlMultiHandlerTest extends TestCase
         self::assertInstanceOf(CurlFactory::class, $factory);
 
         return $factory;
+    }
+
+    private static function readIdleHandles(CurlFactory $factory): array
+    {
+        $readIdleHandles = \Closure::bind(static function (CurlFactory $factory): array {
+            return $factory->handles;
+        }, null, CurlFactory::class);
+
+        return $readIdleHandles($factory);
     }
 
     private static function readShareHandleState(CurlMultiHandler $handler): ?CurlShareHandleState
