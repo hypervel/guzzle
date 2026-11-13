@@ -520,6 +520,39 @@ class UtilsTest extends TestCase
         }
     }
 
+    public function testBuiltInHandlerCallableKeepsTheCoroutineHandlerIdleLimits(): void
+    {
+        self::skipIfDefaultCurlMultiHandlerIsUnavailable();
+
+        Utils::setDefaultHandlerFactory(static function (array $handlerOptions, callable $default): callable {
+            return $default();
+        });
+
+        try {
+            $handler = Utils::chooseHandler(['max_idle_handles' => 0, 'max_idle_multi_handlers' => 3]);
+        } finally {
+            Utils::setDefaultHandlerFactory(null);
+        }
+
+        $handlers = (new \ReflectionFunction($handler))->getStaticVariables();
+        if (isset($handlers['streaming'])) {
+            $handlers = (new \ReflectionFunction($handlers['default']))->getStaticVariables();
+        }
+
+        $maxIdleHandlers = \Closure::bind(static function (ContextualCurlMultiHandler $handler): int {
+            return $handler->maxIdleHandlers;
+        }, null, ContextualCurlMultiHandler::class)($handlers['default']);
+        $factory = \Closure::bind(static function (CurlMultiHandler $handler): CurlFactory {
+            return $handler->factory;
+        }, null, CurlMultiHandler::class)(self::createPooledHandler($handlers['default']));
+        $maxIdleHandles = \Closure::bind(static function (CurlFactory $factory): int {
+            return $factory->maxHandles;
+        }, null, CurlFactory::class)($factory);
+
+        self::assertSame(3, $maxIdleHandlers);
+        self::assertSame(0, $maxIdleHandles);
+    }
+
     public function testChooseHandlerRejectsANonCallableFromTheDefaultHandlerFactory(): void
     {
         Utils::setDefaultHandlerFactory(static function () {
