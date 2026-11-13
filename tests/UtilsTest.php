@@ -452,6 +452,8 @@ class UtilsTest extends TestCase
         yield 'transport sharing' => [['transport_sharing' => 'invalid'], 'The "transport_sharing" option must be null or a GuzzleHttp\TransportSharing::* constant; received string.'];
         yield 'max host connections' => [['max_host_connections' => 0], 'max_host_connections must be a positive integer.'];
         yield 'max idle handles' => [['max_idle_handles' => -1], 'max_idle_handles must be a non-negative integer.'];
+        yield 'max idle multi handlers' => [['max_idle_multi_handlers' => -1], 'max_idle_multi_handlers must be a non-negative integer.'];
+        yield 'max idle multi handlers with connection caps' => [['max_idle_multi_handlers' => 1, 'max_total_connections' => 2], 'The "max_idle_multi_handlers" option cannot be combined with connection caps, which require one shared cURL multi handler.'];
         yield 'max total connections' => [['max_total_connections' => '1'], 'max_total_connections must be a positive integer.'];
     }
 
