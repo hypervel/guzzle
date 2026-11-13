@@ -655,6 +655,19 @@ class CookieJarTest extends TestCase
         self::assertSame('sid=rotated', $this->jar->withCookieHeader($request)->getHeaderLine('Cookie'));
     }
 
+    public function testUnchangedCookieRemovesStoredCookieChangedIntoDuplicate(): void
+    {
+        $request = new Request('GET', 'https://example.com/');
+        $this->jar->extractCookies(new Request('GET', 'https://example.com/app/login'), new Response(200, ['Set-Cookie' => 'sid=abc; Path=/app']));
+        $this->jar->extractCookies($request, new Response(200, ['Set-Cookie' => 'sid=stale; Path=/']));
+        $cookie = $this->jar->getCookieByName('sid');
+        $cookie->setPath('/');
+
+        self::assertFalse($this->jar->setCookie(clone $cookie));
+        self::assertCount(1, $this->jar);
+        self::assertSame('sid=abc', $this->jar->withCookieHeader($request)->getHeaderLine('Cookie'));
+    }
+
     public function testDistinctNumericStringCookieNamesCoexist(): void
     {
         $this->jar->setCookie(new SetCookie([

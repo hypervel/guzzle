@@ -197,6 +197,7 @@ class CookieJar implements CookieJarInterface
 
         // Resolve conflicts with previously set cookies
         $replaced = false;
+        $unchanged = false;
         foreach ($this->cookies as $i => $c) {
             // Two cookies are identical, when their path, and domain are
             // identical.
@@ -215,7 +216,7 @@ class CookieJar implements CookieJarInterface
             }
 
             // A stored cookie can be mutated into a duplicate, so drop later matches
-            if ($replaced) {
+            if ($replaced || $unchanged) {
                 unset($this->cookies[$i]);
                 continue;
             }
@@ -233,7 +234,12 @@ class CookieJar implements CookieJarInterface
                 continue;
             }
 
-            // The cookie exists, so no need to continue
+            // The cookie exists. Upstream returns here, which skips dropping
+            // later duplicates, so keep scanning
+            $unchanged = true;
+        }
+
+        if ($unchanged) {
             return false;
         }
 
