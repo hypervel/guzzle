@@ -2630,6 +2630,10 @@ class StreamHandlerTest extends TestCase
 
             self::assertSame('ini@example.com', \ini_get('from'));
         } finally {
+            // Unlike upstream, destroy the fibers first: a fiber still suspended
+            // after a failed assertion restores the setting when destroyed
+            unset($first, $second);
+
             if ($previous !== false) {
                 \ini_set('from', $previous);
             }
