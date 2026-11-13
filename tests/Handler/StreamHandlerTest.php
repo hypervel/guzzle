@@ -2462,6 +2462,32 @@ class StreamHandlerTest extends TestCase
         self::assertSame('', Server::received()[0]->getHeaderLine('From'));
     }
 
+    public function testDoesNotSendAFromHeaderWhenTheIniIsNotSet(): void
+    {
+        $this->queueRes();
+        $handler = new StreamHandler();
+        $previous = \ini_get_all(null, false)['from'];
+        \ini_restore('from');
+
+        try {
+            if (\ini_get_all(null, false)['from'] !== null) {
+                self::markTestSkipped('The from ini setting is configured.');
+            }
+
+            $handler(new Request('GET', Server::$url), [])->wait();
+            $after = \ini_get_all(null, false)['from'];
+        } finally {
+            \ini_restore('from');
+            if ($previous !== null) {
+                \ini_set('from', $previous);
+            }
+        }
+
+        self::assertFalse(Server::received()[0]->hasHeader('From'));
+        // ini_get() reports an unset setting and an empty one alike.
+        self::assertNull($after);
+    }
+
     public function testSendsExplicitFromHeaderWhenTheIniIsSet(): void
     {
         $this->queueRes();
@@ -2477,6 +2503,141 @@ class StreamHandlerTest extends TestCase
         }
 
         self::assertSame(['request@example.com'], Server::received()[0]->getHeader('From'));
+    }
+
+    public function testDoesNotSendAFromIniValueSetDuringAnotherTransfer(): void
+    {
+        Server::flush();
+        Server::enqueue([
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+        ]);
+        $handler = new StreamHandler();
+        $outerFrom = null;
+        $previous = \ini_set('from', 'ini@example.com');
+
+        try {
+            $handler(new Request('GET', Server::$url), [
+                'progress' => static function () use ($handler, &$outerFrom): void {
+                    if ($outerFrom === null) {
+                        $outerFrom = \ini_get('from');
+                        \ini_set('from', 'other@example.com');
+                        $handler(new Request('GET', Server::$url), [])->wait();
+                    }
+                },
+            ])->wait();
+        } finally {
+            if ($previous !== false) {
+                \ini_set('from', $previous);
+            }
+        }
+
+        // The nested transfer started inside the outer open.
+        self::assertSame('', $outerFrom);
+        self::assertSame('', Server::received()[1]->getHeaderLine('From'));
+    }
+
+    public function testDoesNotSendAFromIniValueSetWhileAnotherTransferConnects(): void
+    {
+        Server::flush();
+        Server::enqueue([
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+        ]);
+        $handler = new StreamHandler();
+        $wrapper = new class {
+            /** @var resource */
+            public $context;
+
+            public function stream_open(): bool
+            {
+                return true;
+            }
+
+            public function stream_write(string $data): int
+            {
+                \stream_context_get_options($this->context)['guzzle-test']['write']($data);
+
+                return \strlen($data);
+            }
+        };
+        \stream_wrapper_register('guzzle-test', \get_class($wrapper));
+        $nested = false;
+        $debug = \fopen('guzzle-test://debug', 'w', false, \stream_context_create(['guzzle-test' => [
+            'write' => static function (string $data) use ($handler, &$nested): void {
+                if (!$nested && \strpos($data, '[CONNECT]') !== false) {
+                    $nested = true;
+                    \ini_set('from', 'other@example.com');
+                    $handler(new Request('GET', Server::$url.'b'), [])->wait();
+                }
+            },
+        ]]));
+        $previous = \ini_set('from', '');
+
+        try {
+            $handler(new Request('GET', Server::$url.'a'), ['debug' => $debug])->wait();
+        } finally {
+            if ($previous !== false) {
+                \ini_set('from', $previous);
+            }
+            \fclose($debug);
+            \stream_wrapper_unregister('guzzle-test');
+        }
+
+        // The nested transfer completed before the outer request was built.
+        $received = Server::received();
+        self::assertSame('/b', $received[0]->getUri()->getPath());
+        self::assertSame('', $received[0]->getHeaderLine('From'));
+        self::assertSame('/a', $received[1]->getUri()->getPath());
+        self::assertSame('', $received[1]->getHeaderLine('From'));
+    }
+
+    public function testRestoresTheFromIniAfterOverlappingTransfers(): void
+    {
+        if (\PHP_VERSION_ID < 80100) {
+            self::markTestSkipped('Fibers are unavailable.');
+        }
+
+        Server::flush();
+        Server::enqueue([
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+            new Response(200, ['Content-Length' => '8'], 'hi there'),
+        ]);
+        $handler = new StreamHandler();
+        $transfer = static function () use ($handler): void {
+            $suspended = false;
+            $handler(new Request('GET', Server::$url), [
+                'progress' => static function () use (&$suspended): void {
+                    if (!$suspended) {
+                        $suspended = true;
+                        \Fiber::suspend(\ini_get('from'));
+                    }
+                },
+            ])->wait();
+        };
+        $previous = \ini_set('from', 'ini@example.com');
+
+        try {
+            $first = new \Fiber($transfer);
+            $second = new \Fiber($transfer);
+
+            // Both transfers are parked inside the open with the setting blanked.
+            self::assertSame('', $first->start());
+            self::assertSame('', $second->start());
+
+            $first->resume();
+            $second->resume();
+
+            self::assertSame('ini@example.com', \ini_get('from'));
+        } finally {
+            // Unlike upstream, destroy the fibers first: a fiber still suspended
+            // after a failed assertion restores the setting when destroyed
+            unset($first, $second);
+
+            if ($previous !== false) {
+                \ini_set('from', $previous);
+            }
+        }
     }
 
     protected function getSendResult(array $opts): ResponseInterface
@@ -3621,6 +3782,46 @@ class StreamHandlerTest extends TestCase
         } catch (ConnectException $e) {
             self::assertSame($nested, $e);
         }
+    }
+
+    public function testDoesNotCaptureUnrelatedErrorsWhileSuspendedInProgressCallback(): void
+    {
+        if (\PHP_VERSION_ID < 80100) {
+            self::markTestSkipped('Fibers are unavailable.');
+        }
+
+        $this->queueRes();
+        $handler = new StreamHandler();
+        $fiber = new \Fiber(static function () use ($handler): void {
+            $suspended = false;
+            $handler(new Request('GET', Server::$url), [
+                'progress' => static function () use (&$suspended): void {
+                    if (!$suspended) {
+                        $suspended = true;
+                        \Fiber::suspend();
+                    }
+                },
+            ])->wait();
+        });
+        $errors = [];
+        \set_error_handler(static function (int $level, string $message) use (&$errors): bool {
+            $errors[] = $message;
+
+            return true;
+        });
+
+        try {
+            $fiber->start();
+            self::assertTrue($fiber->isSuspended());
+
+            \trigger_error('Unrelated warning', \E_USER_WARNING);
+
+            $fiber->resume();
+        } finally {
+            \restore_error_handler();
+        }
+
+        self::assertSame(['Unrelated warning'], $errors);
     }
 
     public function testProgressOverflowValueThrows(): void

@@ -196,6 +196,8 @@ class CookieJar implements CookieJarInterface
         }
 
         // Resolve conflicts with previously set cookies
+        $replaced = false;
+        $unchanged = false;
         foreach ($this->cookies as $i => $c) {
             // Two cookies are identical, when their path, and domain are
             // identical.
@@ -207,22 +209,43 @@ class CookieJar implements CookieJarInterface
                 continue;
             }
 
-            // Replace the old cookie when its value, expiry or flags changed
+            // An expired cookie is gone, so it must not lend its position
+            if ($c->isExpired()) {
+                unset($this->cookies[$i]);
+                continue;
+            }
+
+            // A stored cookie can be mutated into a duplicate, so drop later matches
+            if ($replaced || $unchanged) {
+                unset($this->cookies[$i]);
+                continue;
+            }
+
+            // Replace the old cookie in place when its value, expiry or flags
+            // changed, so it keeps its position among the other cookies
             if ($cookie->getValue() !== $c->getValue()
                 || $cookie->getExpires() !== $c->getExpires()
                 || $cookie->getDiscard() !== $c->getDiscard()
                 || $cookie->getSecure() !== $c->getSecure()
                 || $cookie->getHttpOnly() !== $c->getHttpOnly()
             ) {
-                unset($this->cookies[$i]);
+                $this->cookies[$i] = $cookie;
+                $replaced = true;
                 continue;
             }
 
-            // The cookie exists, so no need to continue
+            // The cookie exists. Upstream returns here, which skips dropping
+            // later duplicates, so keep scanning
+            $unchanged = true;
+        }
+
+        if ($unchanged) {
             return false;
         }
 
-        $this->cookies[] = $cookie;
+        if (!$replaced) {
+            $this->cookies[] = $cookie;
+        }
 
         return true;
     }
@@ -369,6 +392,7 @@ class CookieJar implements CookieJarInterface
         RequestInterface $request
     ): RequestInterface {
         $values = [];
+        $count = 0;
         $headerLength = 8;
         $uri = $request->getUri();
         $scheme = $uri->getScheme();
@@ -390,16 +414,20 @@ class CookieJar implements CookieJarInterface
                     break;
                 }
 
-                $values[] = $name.'='.$value;
+                $values[\strlen($cookie->getPath())][] = $name.'='.$value;
                 $headerLength += $separatorLength + $valueLength;
-                if (\count($values) === self::MAX_REQUEST_COOKIES) {
+                if (++$count === self::MAX_REQUEST_COOKIES) {
                     break;
                 }
             }
         }
 
+        // Longer paths first, then creation order, as in RFC 6265 section 5.4,
+        // sorted after the limits so later cookies cannot crowd out older ones
+        \krsort($values);
+
         return $values
-            ? $request->withHeader('Cookie', \implode('; ', $values))
+            ? $request->withHeader('Cookie', \implode('; ', \array_merge(...$values)))
             : $request;
     }
 

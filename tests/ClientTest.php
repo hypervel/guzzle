@@ -450,48 +450,37 @@ class ClientTest extends TestCase
         ]);
     }
 
-    /**
-     * @dataProvider idleLimitOptionProvider
-     */
-    public function testRejectsInvalidIdleLimits(string $option): void
+    public function testMaxIdleHandlesClientOptionCannotBeUsedWithCustomHandler(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage($option.' must be a non-negative integer.');
+        $this->expectExceptionMessage('The "max_idle_handles" client option requires Guzzle to create the default handler. Configure the option on the CurlHandler or CurlMultiHandler constructor when providing a custom handler.');
 
-        new Client([$option => -1]);
+        new Client([
+            'handler' => new MockHandler(),
+            'max_idle_handles' => 4,
+        ]);
     }
 
-    /**
-     * @dataProvider idleLimitOptionProvider
-     */
-    public function testIdleLimitsCannotBeUsedWithCustomHandler(string $option): void
+    public function testMaxIdleMultiHandlersClientOptionCannotBeUsedWithCustomHandler(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The "'.$option.'" client option requires Guzzle to create the default handler.');
+        $this->expectExceptionMessage('The "max_idle_multi_handlers" client option requires Guzzle to create the default handler. Configure the idle pool on ContextualCurlMultiHandler when providing a custom handler.');
 
-        new Client([$option => 0, 'handler' => new MockHandler()]);
+        new Client([
+            'handler' => new MockHandler(),
+            'max_idle_multi_handlers' => 4,
+        ]);
     }
 
-    public static function idleLimitOptionProvider(): iterable
-    {
-        yield 'easy handles' => ['max_idle_handles'];
-        yield 'multi handlers' => ['max_idle_multi_handlers'];
-    }
-
-    public function testNullMaxIdleHandlesCanBeUsedWithCustomHandler(): void
-    {
-        $client = new Client(['max_idle_handles' => null, 'max_idle_multi_handlers' => null, 'handler' => new MockHandler()]);
-
-        self::assertArrayNotHasKey('max_idle_handles', $client->getConfig());
-        self::assertArrayNotHasKey('max_idle_multi_handlers', $client->getConfig());
-    }
-
-    public function testIdleHandlerLimitCannotBeCombinedWithConnectionCaps(): void
+    public function testMaxIdleMultiHandlersClientOptionCannotBeCombinedWithConnectionCaps(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('The "max_idle_multi_handlers" option cannot be combined with connection caps');
+        $this->expectExceptionMessage('The "max_idle_multi_handlers" option cannot be combined with connection caps, which require one shared cURL multi handler.');
 
-        new Client(['max_idle_multi_handlers' => 1, 'max_total_connections' => 2]);
+        new Client([
+            'max_idle_multi_handlers' => 4,
+            'max_total_connections' => 2,
+        ]);
     }
 
     public function testNullConnectionCapClientOptionsCanBeUsedWithCustomHandler(): void
@@ -504,6 +493,26 @@ class ClientTest extends TestCase
 
         self::assertNull($client->getConfig('max_host_connections'));
         self::assertNull($client->getConfig('max_total_connections'));
+    }
+
+    public function testNullMaxIdleHandlesClientOptionCanBeUsedWithCustomHandler(): void
+    {
+        $client = new Client([
+            'handler' => new MockHandler(),
+            'max_idle_handles' => null,
+        ]);
+
+        self::assertArrayNotHasKey('max_idle_handles', $client->getConfig());
+    }
+
+    public function testNullMaxIdleMultiHandlersClientOptionCanBeUsedWithCustomHandler(): void
+    {
+        $client = new Client([
+            'handler' => new MockHandler(),
+            'max_idle_multi_handlers' => null,
+        ]);
+
+        self::assertArrayNotHasKey('max_idle_multi_handlers', $client->getConfig());
     }
 
     /**
@@ -520,6 +529,44 @@ class ClientTest extends TestCase
             $this->expectExceptionMessage($option.' must be a positive integer.');
 
             new Client([$option => $value]);
+        } finally {
+            self::setCurlVersionInfo($previousVersionInfo);
+        }
+    }
+
+    /**
+     * @dataProvider invalidMaxIdleHandlesClientOptionProvider
+     *
+     * @param mixed $value
+     */
+    public function testRejectsInvalidMaxIdleHandlesClientOptionWhenCurlIsUnavailable($value): void
+    {
+        $previousVersionInfo = self::setCurlVersionInfo(['version' => '7.29.0', 'features' => 0]);
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('max_idle_handles must be a non-negative integer.');
+
+            new Client(['max_idle_handles' => $value]);
+        } finally {
+            self::setCurlVersionInfo($previousVersionInfo);
+        }
+    }
+
+    /**
+     * @dataProvider invalidMaxIdleHandlesClientOptionProvider
+     *
+     * @param mixed $value
+     */
+    public function testRejectsInvalidMaxIdleMultiHandlersClientOptionWhenCurlIsUnavailable($value): void
+    {
+        $previousVersionInfo = self::setCurlVersionInfo(['version' => '7.29.0', 'features' => 0]);
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('max_idle_multi_handlers must be a non-negative integer.');
+
+            new Client(['max_idle_multi_handlers' => $value]);
         } finally {
             self::setCurlVersionInfo($previousVersionInfo);
         }
@@ -700,6 +747,13 @@ class ClientTest extends TestCase
             yield $option.' float' => [$option, 1.0];
             yield $option.' string' => [$option, '1'];
         }
+    }
+
+    public static function invalidMaxIdleHandlesClientOptionProvider(): iterable
+    {
+        yield 'negative' => [-1];
+        yield 'float' => [1.0];
+        yield 'string' => ['1'];
     }
 
     public static function strictTransportSharingModeProvider(): iterable

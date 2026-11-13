@@ -29,6 +29,32 @@ class HeaderProcessorTest extends TestCase
         self::assertSame(['X-Foo' => ['bar', 'baz'], 'X-Bar' => ['qux']], $headers);
     }
 
+    public function testParsesHeadersFromLines(): void
+    {
+        $lines = [
+            'Foo: bar',
+            'Foo: baz',
+            'Abc: 123',
+            'Def: a, b',
+        ];
+
+        $expected = [
+            'Foo' => ['bar', 'baz'],
+            'Abc' => ['123'],
+            'Def' => ['a, b'],
+        ];
+
+        self::assertSame($expected, HeaderProcessor::headersFromLines($lines));
+    }
+
+    public function testParsesHeadersFromLinesWithMultipleLines(): void
+    {
+        $lines = ['Foo: bar', 'Foo: baz', 'Foo: 123'];
+        $expected = ['Foo' => ['bar', 'baz', '123']];
+
+        self::assertSame($expected, HeaderProcessor::headersFromLines($lines));
+    }
+
     public static function statusLineCandidateProvider(): iterable
     {
         yield 'http/1.1' => ['HTTP/1.1 200 OK', true];
@@ -231,6 +257,55 @@ class HeaderProcessorTest extends TestCase
     }
 
     /**
+     * @dataProvider headersInExceptionTraceProvider
+     *
+     * @param list<mixed>        $arguments
+     * @param array<string, int> $sensitiveArguments
+     */
+    public function testKeepsHeadersOutOfExceptionTraces(
+        string $method,
+        array $arguments,
+        array $sensitiveArguments
+    ): void {
+        if (\PHP_VERSION_ID < 80200) {
+            self::markTestSkipped('Sensitive parameters are not redacted before PHP 8.2.');
+        }
+
+        $previous = \ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            HeaderProcessor::$method(...$arguments);
+            self::fail('Expected a RuntimeException');
+        } catch (\RuntimeException $e) {
+            $redacted = [];
+            foreach ($e->getTrace() as $frame) {
+                if (($frame['class'] ?? null) === HeaderProcessor::class && isset($sensitiveArguments[$frame['function']])) {
+                    self::assertInstanceOf(\SensitiveParameterValue::class, $frame['args'][$sensitiveArguments[$frame['function']]]);
+                    $redacted[] = $frame['function'];
+                }
+            }
+
+            self::assertSame(\array_keys($sensitiveArguments), $redacted);
+        } finally {
+            \ini_set('zend.exception_ignore_args', $previous);
+        }
+    }
+
+    public static function headersInExceptionTraceProvider(): iterable
+    {
+        yield 'invalid header line' => [
+            'parseHeaders',
+            [['HTTP/1.1 200 OK', 'Set-Cookie: sid=secret', 'invalid']],
+            ['parseHeaders' => 0],
+        ];
+        yield 'invalid framing' => [
+            'validateResponseFraming',
+            ['GET', 200, ['Set-Cookie' => ['sid=secret'], 'Transfer-Encoding' => ['gzip']]],
+            ['parseTransferEncoding' => 0, 'validateResponseFraming' => 2],
+        ];
+    }
+
+    /**
      * @dataProvider transferEncodingProvider
      *
      * @param array<string, string[]> $headers
@@ -250,6 +325,22 @@ class HeaderProcessorTest extends TestCase
         yield 'identity on a later field line' => [['Transfer-Encoding' => ['chunked', 'identity']], true];
         yield 'identity only' => [['Transfer-Encoding' => ['identity']], false];
         yield 'empty list' => [['Transfer-Encoding' => [',']], false];
+    }
+
+    public function testNormalizeHeaderKeys(): void
+    {
+        $input = ['HelLo' => 'foo', 'WORld' => 'bar'];
+        $expected = ['hello' => 'HelLo', 'world' => 'WORld'];
+
+        self::assertSame($expected, HeaderProcessor::normalizeHeaderKeys($input));
+    }
+
+    public function testNormalizeHeaderKeysHandlesNumericKeys(): void
+    {
+        $input = [0 => 'zero', 'HelLo' => 'foo'];
+        $expected = [0 => 0, 'hello' => 'HelLo'];
+
+        self::assertSame($expected, HeaderProcessor::normalizeHeaderKeys($input));
     }
 
     public function testReturnsUnrepresentableResponseContentLengthForCallerPolicy(): void

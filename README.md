@@ -53,10 +53,9 @@ Guzzle client, including clients that SDKs create. This fork adds:
   and each easy handle has its own connection cache, so with 3 most concurrent
   requests would open new connections. `CurlMultiHandler` keeps its default of
   50. See [Idle cURL Handles](docs/handlers.md#idle-curl-handles).
-- **Upstream pull requests.** The fork includes
-  [#3935](https://github.com/guzzle/guzzle/pull/3935), which adds the
-  `max_idle_handles` option for the cURL handlers. Stream handling fixes use
-  upstream's implementations.
+- **Fixes not in upstream.** Setting a cookie the jar already holds also removes
+  stored cookies that were changed into duplicates of it. Response header
+  parsing keeps headers out of exception traces, as they can carry credentials.
 
 > [!IMPORTANT]
 > This fork keeps upstream's public API. Once installed, it replaces

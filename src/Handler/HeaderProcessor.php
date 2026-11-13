@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace GuzzleHttp\Handler;
 
 use GuzzleHttp\Psr7;
-use GuzzleHttp\Utils;
 
 /**
  * @internal
@@ -25,8 +24,11 @@ final class HeaderProcessor
      *
      * @throws \RuntimeException
      */
-    public static function parseHeaders(array $headers): array
-    {
+    public static function parseHeaders(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        array $headers
+    ): array {
         if ($headers === []) {
             throw new \RuntimeException('Expected a non-empty array of header data');
         }
@@ -73,7 +75,28 @@ final class HeaderProcessor
             }
         }
 
-        return [$version, (int) $status, $reason, Utils::headersFromLines($headers)];
+        return [$version, (int) $status, $reason, self::headersFromLines($headers)];
+    }
+
+    /**
+     * Parses an array of header lines into an associative array of headers.
+     *
+     * @param iterable $lines Header lines array of strings in the following
+     *                        format: "Name: Value"
+     */
+    public static function headersFromLines(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        iterable $lines
+    ): array {
+        $headers = [];
+
+        foreach ($lines as $line) {
+            $parts = \explode(':', $line, 2);
+            $headers[\trim($parts[0], " \n\r\t\0\x0B")][] = isset($parts[1]) ? \trim($parts[1], " \n\r\t\0\x0B") : null;
+        }
+
+        return $headers;
     }
 
     public static function isStatusLineCandidate(string $line): bool
@@ -171,13 +194,15 @@ final class HeaderProcessor
     public static function validateResponseFraming(
         string $method,
         int $status,
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
         array $headers
     ): ?string {
         if (!self::responseCanHaveBody($method, $status)) {
             return null;
         }
 
-        $normalizedKeys = Utils::normalizeHeaderKeys($headers);
+        $normalizedKeys = self::normalizeHeaderKeys($headers);
         $contentLength = self::removeHeader('Content-Length', $headers);
 
         try {
@@ -207,8 +232,11 @@ final class HeaderProcessor
      * @throws \RuntimeException when a coding is unsupported or follows chunked
      *                           on the same field line
      */
-    public static function parseTransferEncoding(array $headers): bool
-    {
+    public static function parseTransferEncoding(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        array $headers
+    ): bool {
         $chunked = false;
 
         foreach ($headers as $name => $values) {
@@ -262,6 +290,20 @@ final class HeaderProcessor
         }
 
         return $values;
+    }
+
+    /**
+     * Creates an associative array of lowercase header names to the actual
+     * header casing.
+     */
+    public static function normalizeHeaderKeys(array $headers): array
+    {
+        $result = [];
+        foreach (\array_keys($headers) as $key) {
+            $result[Psr7\Utils::asciiToLower((string) $key)] = $key;
+        }
+
+        return $result;
     }
 
     /**

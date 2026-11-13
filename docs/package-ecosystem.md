@@ -10,7 +10,7 @@ application needs that package's lower-level or specialized behavior.
 | Package | Use it for | Documentation |
 |---------|------------|---------------|
 | `hypervel/guzzle` | Sending synchronous and asynchronous HTTP requests. | [Quick Start](quick-start.md) |
-| `guzzlehttp/psr7` | Creating and manipulating PSR-7 requests, responses, streams, and URIs. | [PSR-7 docs](https://github.com/guzzle/psr7/blob/3.2/docs/psr-7-messages.md) |
+| `guzzlehttp/psr7` | Creating and manipulating PSR-7 requests, responses, streams, and URIs. | [PSR-7 docs](https://github.com/guzzle/psr7/blob/3.4/docs/psr-7-messages.md) |
 | `hypervel/guzzle-promises` | Working directly with promises returned by asynchronous operations. | [Promises docs](https://github.com/hypervel/guzzle-promises/blob/3.1/docs/promise-quick-start.md) |
 
 Install `hypervel/guzzle` for normal application HTTP work. It already depends

@@ -18,7 +18,7 @@ use Psr\Http\Message\ResponseInterface;
  * connections. Concurrent coroutines use separate handlers; requests in the
  * same coroutine share a handler while its transfers are active.
  *
- * @see https://github.com/hypervel/guzzle/blob/8.3/docs/handlers.md#coroutine-handlers
+ * @see https://github.com/hypervel/guzzle/blob/8.5/docs/handlers.md#coroutine-handlers
  */
 final class ContextualCurlMultiHandler
 {
