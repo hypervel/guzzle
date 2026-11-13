@@ -24,8 +24,11 @@ final class HeaderProcessor
      *
      * @throws \RuntimeException
      */
-    public static function parseHeaders(array $headers): array
-    {
+    public static function parseHeaders(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        array $headers
+    ): array {
         if ($headers === []) {
             throw new \RuntimeException('Expected a non-empty array of header data');
         }
@@ -81,8 +84,11 @@ final class HeaderProcessor
      * @param iterable $lines Header lines array of strings in the following
      *                        format: "Name: Value"
      */
-    public static function headersFromLines(iterable $lines): array
-    {
+    public static function headersFromLines(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        iterable $lines
+    ): array {
         $headers = [];
 
         foreach ($lines as $line) {
@@ -188,6 +194,8 @@ final class HeaderProcessor
     public static function validateResponseFraming(
         string $method,
         int $status,
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
         array $headers
     ): ?string {
         if (!self::responseCanHaveBody($method, $status)) {
@@ -224,8 +232,11 @@ final class HeaderProcessor
      * @throws \RuntimeException when a coding is unsupported or follows chunked
      *                           on the same field line
      */
-    public static function parseTransferEncoding(array $headers): bool
-    {
+    public static function parseTransferEncoding(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        array $headers
+    ): bool {
         $chunked = false;
 
         foreach ($headers as $name => $values) {

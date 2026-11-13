@@ -257,6 +257,55 @@ class HeaderProcessorTest extends TestCase
     }
 
     /**
+     * @dataProvider headersInExceptionTraceProvider
+     *
+     * @param list<mixed>        $arguments
+     * @param array<string, int> $sensitiveArguments
+     */
+    public function testKeepsHeadersOutOfExceptionTraces(
+        string $method,
+        array $arguments,
+        array $sensitiveArguments
+    ): void {
+        if (\PHP_VERSION_ID < 80200) {
+            self::markTestSkipped('Sensitive parameters are not redacted before PHP 8.2.');
+        }
+
+        $previous = \ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            HeaderProcessor::$method(...$arguments);
+            self::fail('Expected a RuntimeException');
+        } catch (\RuntimeException $e) {
+            $redacted = [];
+            foreach ($e->getTrace() as $frame) {
+                if (($frame['class'] ?? null) === HeaderProcessor::class && isset($sensitiveArguments[$frame['function']])) {
+                    self::assertInstanceOf(\SensitiveParameterValue::class, $frame['args'][$sensitiveArguments[$frame['function']]]);
+                    $redacted[] = $frame['function'];
+                }
+            }
+
+            self::assertSame(\array_keys($sensitiveArguments), $redacted);
+        } finally {
+            \ini_set('zend.exception_ignore_args', $previous);
+        }
+    }
+
+    public static function headersInExceptionTraceProvider(): iterable
+    {
+        yield 'invalid header line' => [
+            'parseHeaders',
+            [['HTTP/1.1 200 OK', 'Set-Cookie: sid=secret', 'invalid']],
+            ['parseHeaders' => 0],
+        ];
+        yield 'invalid framing' => [
+            'validateResponseFraming',
+            ['GET', 200, ['Set-Cookie' => ['sid=secret'], 'Transfer-Encoding' => ['gzip']]],
+            ['parseTransferEncoding' => 0, 'validateResponseFraming' => 2],
+        ];
+    }
+
+    /**
      * @dataProvider transferEncodingProvider
      *
      * @param array<string, string[]> $headers

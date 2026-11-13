@@ -40,8 +40,11 @@ final class Utils
      * @deprecated Utils::headersFromLines() will be removed in
      *             guzzlehttp/guzzle:9.0.
      */
-    public static function headersFromLines(iterable $lines): array
-    {
+    public static function headersFromLines(
+        // Unlike upstream, keep headers out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        iterable $lines
+    ): array {
         \trigger_deprecation(
             'guzzlehttp/guzzle',
             '8.5',
