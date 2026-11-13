@@ -239,6 +239,10 @@ connection caps are configured. Synchronous requests still use `CurlHandler`.
 One client can serve concurrent coroutines; each promise must still be created
 and completed in its owning coroutine.
 
+The callable passed to a [default handler factory](#default-handler-factory)
+returns this default handler, so a factory that wraps it keeps the coroutine
+handler. A factory that creates its own handler replaces it.
+
 `max_idle_multi_handlers` (int|null): Maximum number of idle cURL multi handlers
 retained for coroutine requests. Zero disables retention; null or omission keeps
 the default of 64. Cannot be combined with connection caps or a custom handler.
