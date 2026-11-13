@@ -240,9 +240,8 @@ One client can serve concurrent coroutines; each promise must still be created
 and completed in its owning coroutine.
 
 `max_idle_multi_handlers` (int|null): Maximum number of idle cURL multi handlers
-retained for coroutine requests. Accepts a non-negative integer or null. Zero
-disables retention; null or omission keeps the default of 64. Cannot be combined
-with connection caps or a custom handler.
+retained for coroutine requests. Zero disables retention; null or omission keeps
+the default of 64. Cannot be combined with connection caps or a custom handler.
 
 ```php
 $client = new \GuzzleHttp\Client(['max_idle_multi_handlers' => 16]);

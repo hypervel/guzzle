@@ -78,9 +78,9 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      *   omission keeps the defaults of 256 for CurlHandler and 50 for
      *   CurlMultiHandler. This setting does not affect the stream handler.
      * - max_idle_multi_handlers: (int|null) Maximum number of idle cURL multi
-     *   handlers retained for coroutine requests. Accepts a non-negative integer
-     *   or null. Zero disables retention; null or omission keeps the default of
-     *   64. Cannot be combined with connection caps or a custom handler.
+     *   handlers retained for coroutine requests. Zero disables retention; null
+     *   or omission keeps the default of 64. Cannot be combined with connection
+     *   caps or a custom handler.
      * - max_total_connections: (int|null) Maximum concurrent connections
      *   overall, enforced by the default CurlMultiHandler. The default stream
      *   fallback receives the cap as a marker only: it rejects enabled
