@@ -16,7 +16,7 @@ jobs:
     name: Build lowest version
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/hypervel/components-ci:php8.4-swoole6.3.0-rc1
+      image: ghcr.io/hypervel/components-ci:php8.4-swoole-nightly
 
     steps:
       - name: Set up Node
@@ -41,7 +41,7 @@ jobs:
     name: Build
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/hypervel/components-ci:php${{ matrix.php }}-swoole6.3.0-rc1
+      image: ghcr.io/hypervel/components-ci:php${{ matrix.php }}-swoole-nightly
     strategy:
       fail-fast: false
       max-parallel: 10
