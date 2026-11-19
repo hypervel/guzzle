@@ -292,18 +292,20 @@ of a transfer error, whether or not `Swoole\Coroutine::cancel()` was asked to
 throw. This includes a cancellation thrown into a callback such as `on_headers`,
 `progress` or `on_trailers`, into a read of the request body or into a write to
 the `sink`. An application exception that carries a cancellation keeps its own
-meaning, as does a failure from a custom stream implementation. An interrupted
-request delay throws the cancellation.
+meaning, as does a failure from a custom stream implementation. A cancellation
+while a stream seeks or rewinds can still be reported as a request or response
+exception. An interrupted request delay throws the cancellation.
 
 - `CurlHandler` releases the transfer and reports the cancellation to
   `on_stats`. If `curl_exec()` itself throws the cancellation, it leaves the
-  handler call, so promise-based middleware such as retries never handles it.
-  Any other cancellation rejects the promise. Reading a request body smaller
-  than 1 MB happens before the transfer starts, so a cancellation there is
-  thrown. When the coroutine is canceled without an exception, a transfer
-  created by a custom `handle_factory` keeps its cURL error, because the
-  factory's callbacks can abort a transfer with the error Swoole reports for
-  that cancellation.
+  handler call, so promise-based middleware in the handler stack, such as
+  retries, never handles it. Global middleware runs outside the handler stack
+  and receives it as a rejection. Any other cancellation rejects the promise.
+  Reading a request body smaller than 1 MB happens before the transfer starts,
+  so a cancellation there is thrown. When the coroutine is canceled without an
+  exception, a transfer created by a custom `handle_factory` keeps its cURL
+  error, because the factory's callbacks can abort a transfer with the error
+  Swoole reports for that cancellation.
 - `CurlMultiHandler` throws it from `tick()` and `execute()` and leaves the
   pending transfers running. Waiting on a promise instead rejects the promise
   with it and removes the promise's transfer; other transfers stay pending. A

@@ -116,8 +116,8 @@ final class CurlHandler
             \curl_exec($easy->handle);
         } catch (CanceledException $cancellation) {
             // Swoole throws from the wait when the coroutine is canceled with
-            // an exception. Rethrowing it keeps promise-based middleware, such
-            // as retries, from handling it.
+            // an exception. Rethrowing it keeps promise-based middleware in the
+            // handler stack, such as retries, from handling it.
             CurlFactory::finishCanceled($easy, $this->factory, $cancellation);
 
             throw $cancellation;

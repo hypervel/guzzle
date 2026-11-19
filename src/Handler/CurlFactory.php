@@ -1058,7 +1058,9 @@ final class CurlFactory implements CurlFactoryInterface
         EasyHandle $easy,
         CurlFactoryInterface $factory
     ): PromiseInterface {
-        // A callback's failure stops the transfer, so at most one is recorded.
+        // Same order as createRejection(), which matters because libcurl's
+        // final progress update can record a failure after another callback
+        // stopped the transfer.
         $callbackFailure = $easy->onHeadersException
             ?? $easy->progressException
             ?? $easy->bodyReadException
