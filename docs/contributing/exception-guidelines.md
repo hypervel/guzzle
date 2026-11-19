@@ -72,6 +72,18 @@ no-response interface, so among PSR-18's request-bound interfaces only
 `RequestExceptionInterface` remains once Guzzle holds a response. This is a
 deliberate classification, not a claim that the request message was malformed.
 
+## Coroutine cancellation
+
+When canceling the current Swoole coroutine interrupts a wait the handler owns,
+or throws into a callback or into a read or write of a stock PSR-7 stream, the
+handler reports the `Swoole\Coroutine\CanceledException` itself, never a Guzzle
+exception wrapping it. A cancellation is not a transfer failure, and wrapping it
+would let retry logic resend a request its caller abandoned. Keep catch blocks
+that wrap other failures from catching it. Unwrap only a stock stream's failure,
+and only to its immediate cancellation cause: an application exception that
+carries a cancellation, or a failure from any other stream, keeps its own
+meaning.
+
 ## `GuzzleHttp\Exception\InvalidArgumentException`
 
 `final class InvalidArgumentException extends \InvalidArgumentException implements GuzzleException`

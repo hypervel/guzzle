@@ -6,11 +6,13 @@ namespace GuzzleHttp\Handler;
 
 use GuzzleHttp\Exception\InvalidArgumentException;
 use GuzzleHttp\NonSerializableTrait;
+use GuzzleHttp\Promise as P;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Psr7\DiagnosticValue;
 use GuzzleHttp\TransportSharing;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
+use Swoole\Coroutine\CanceledException;
 
 /**
  * HTTP handler that uses cURL easy handles as a transport layer.
@@ -110,8 +112,33 @@ final class CurlHandler
         // connection with a concurrent transfer.
         $easy = $this->factory->create($request, $options);
 
-        \curl_exec($easy->handle);
+        try {
+            \curl_exec($easy->handle);
+        } catch (CanceledException $cancellation) {
+            // Swoole throws from the wait when the coroutine is canceled with
+            // an exception. Rethrowing it keeps promise-based middleware, such
+            // as retries, from handling it.
+            CurlFactory::finishCanceled($easy, $this->factory, $cancellation);
+
+            throw $cancellation;
+        }
+
         $easy->errno = \curl_errno($easy->handle);
+
+        // @TODO: Preserve error 42 for custom factories until Swoole
+        // distinguishes an interrupted curl_exec() from a callback abort on the
+        // same transfer.
+        if (CurlFactory::wasCanceled($easy)
+            && $this->factory instanceof CurlFactory
+            && \Swoole\Coroutine::getCid() > 0
+            && (\Swoole\Runtime::getHookFlags() & \SWOOLE_HOOK_NATIVE_CURL) !== 0
+        ) {
+            $cancellation = new CanceledException('The cURL transfer was canceled.');
+            CurlFactory::finishCanceled($easy, $this->factory, $cancellation);
+
+            /** @var PromiseInterface<ResponseInterface, mixed> */
+            return P\Create::rejectionFor($cancellation);
+        }
 
         return CurlFactory::finish($this, $easy, $this->factory);
     }

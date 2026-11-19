@@ -15,6 +15,7 @@ use GuzzleHttp\Exception\ResponseTimeoutException;
 use GuzzleHttp\Exception\ResponseTransferException;
 use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\Handler\Clock;
+use GuzzleHttp\Handler\StreamCancellation;
 use GuzzleHttp\Handler\StreamHandler;
 use GuzzleHttp\Handler\StreamTlsSessionCache;
 use GuzzleHttp\Handler\TransferByteCounter;
@@ -28,6 +29,7 @@ use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\RedirectMiddleware;
 use GuzzleHttp\RequestOptions;
 use GuzzleHttp\Server\Server;
+use GuzzleHttp\Tests\CancelingStreamWrapper;
 use GuzzleHttp\Tests\Psr17SpyFactory;
 use GuzzleHttp\Tests\SpyResponse;
 use GuzzleHttp\Tests\SpyStream;
@@ -43,12 +45,17 @@ use Psr\Http\Message\MessageInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
+use Swoole\Coroutine;
+use Swoole\Coroutine\CanceledException;
+use Swoole\Coroutine\Channel;
 
 /**
  * @covers \GuzzleHttp\Handler\StreamHandler
  */
 class StreamHandlerTest extends TestCase
 {
+    use RunsInCoroutines;
+
     private function queueRes(): void
     {
         Server::flush();
@@ -6609,6 +6616,192 @@ class StreamHandlerTest extends TestCase
         };
     }
 
+    /**
+     * @dataProvider interruptedTransferProvider
+     */
+    public function testInterruptedTransfersRejectWithTheirFailure(?callable $respond, array $options, bool $cancel, string $expected, bool $hasResponse): void
+    {
+        if (!$cancel && !\function_exists('socket_import_stream')) {
+            self::markTestSkipped('Resetting the connection needs the sockets extension.');
+        }
+
+        $failure = null;
+        $reported = [];
+        $elapsed = null;
+
+        self::runInCoroutine(static function () use ($respond, $options, $cancel, &$failure, &$reported, &$elapsed): void {
+            $server = \stream_socket_server('tcp://127.0.0.1:0');
+            $done = new Channel(1);
+            if ($respond !== null) {
+                Coroutine::create(static function () use ($server, $respond, $done): void {
+                    $connection = \stream_socket_accept($server, 5);
+                    \fread($connection, 8192);
+                    $respond($connection, $done);
+                });
+            }
+
+            $debugFile = \tempnam(\sys_get_temp_dir(), 'guzzle-debug');
+            // Debug output to a file yields to the scheduler on every write.
+            $debug = \fopen($debugFile, 'w');
+
+            if ($cancel) {
+                // A cancellation the coroutine handled leaves its flag set.
+                self::cancelCurrentCoroutineAfter(0.01);
+                (new Channel())->pop(5);
+                self::cancelCurrentCoroutineAfter(0.1);
+            }
+
+            $start = Clock::now();
+            $promise = (new StreamHandler())(new Request('GET', 'http://'.\stream_socket_get_name($server, false).'/'), $options + [
+                'read_timeout' => 5,
+                'debug' => $debug,
+                'on_stats' => static function (TransferStats $stats) use (&$reported): void {
+                    $reported[] = $stats;
+                },
+            ]);
+            try {
+                $promise->wait();
+            } catch (\Throwable $e) {
+                $failure = $e;
+            }
+            $elapsed = Clock::now() - $start;
+
+            $done->push(true);
+            \fclose($debug);
+            \unlink($debugFile);
+            \fclose($server);
+        });
+
+        self::assertInstanceOf($expected, $failure);
+        self::assertLessThan(1, $elapsed);
+        self::assertCount(1, $reported);
+        self::assertSame($failure, $reported[0]->getHandlerErrorData());
+        self::assertSame($hasResponse, $reported[0]->hasResponse());
+    }
+
+    public static function interruptedTransferProvider(): iterable
+    {
+        $stallMidBody = static function ($connection, Channel $done): void {
+            \fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n".\str_repeat('x', 10));
+            $done->pop(5);
+        };
+
+        yield 'opening' => [null, [], true, CanceledException::class, false];
+        yield 'reading the body' => [$stallMidBody, [], true, CanceledException::class, true];
+        yield 'reading through a custom stream' => [$stallMidBody, [RequestOptions::STREAM_FACTORY => new Psr17SpyFactory()], true, ResponseTransferException::class, true];
+        yield 'connection reset' => [static function ($connection): void {
+            \fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n".\str_repeat('x', 10));
+            Coroutine::sleep(0.1);
+            \socket_set_option(\socket_import_stream($connection), \SOL_SOCKET, \SO_LINGER, ['l_onoff' => 1, 'l_linger' => 0]);
+            \fclose($connection);
+        }, [], false, ResponseTransferException::class, true];
+    }
+
+    public function testCancelingAStreamedBodyReadThrowsTheCancellation(): void
+    {
+        $failure = null;
+        $statsCalls = 0;
+
+        self::runInCoroutine(static function () use (&$failure, &$statsCalls): void {
+            $server = \stream_socket_server('tcp://127.0.0.1:0');
+            $done = new Channel(1);
+            Coroutine::create(static function () use ($server, $done): void {
+                $connection = \stream_socket_accept($server, 5);
+                \fread($connection, 8192);
+                \fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n".\str_repeat('x', 10));
+                $done->pop(5);
+            });
+
+            $response = (new StreamHandler())(new Request('GET', 'http://'.\stream_socket_get_name($server, false).'/'), [
+                'stream' => true,
+                'timeout' => 5,
+                'on_stats' => static function () use (&$statsCalls): void {
+                    ++$statsCalls;
+                },
+            ])->wait();
+            $body = $response->getBody();
+            $body->read(10);
+
+            self::cancelCurrentCoroutineAfter(0.05);
+            try {
+                $body->read(100);
+            } catch (\Throwable $e) {
+                $failure = $e;
+            }
+
+            $done->push(true);
+            \fclose($server);
+        });
+
+        self::assertInstanceOf(CanceledException::class, $failure);
+        self::assertSame(1, $statsCalls);
+    }
+
+    /**
+     * @dataProvider thrownCancellationProvider
+     */
+    public function testCancellationsThrownIntoTheTransferRejectWithThem(callable $createTransfer): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'body')]);
+        [$request, $options] = $createTransfer();
+        $reported = [];
+
+        $promise = (new StreamHandler())($request, $options + [
+            'on_stats' => static function (TransferStats $stats) use (&$reported): void {
+                $reported[] = $stats->getHandlerErrorData();
+            },
+        ]);
+
+        try {
+            $promise->wait();
+            self::fail('Expected the cancellation');
+        } catch (CanceledException $e) {
+            self::assertSame([$e], $reported);
+        }
+    }
+
+    public static function thrownCancellationProvider(): iterable
+    {
+        yield 'file sink' => [static function (): array {
+            return [new Request('GET', Server::$url), ['sink' => CancelingStreamWrapper::open()]];
+        }];
+        yield 'file body' => [static function (): array {
+            return [new Request('PUT', Server::$url, [], Psr7\Utils::streamFor(CancelingStreamWrapper::open())), []];
+        }];
+        yield 'on_headers' => [static function (): array {
+            return [new Request('GET', Server::$url), ['on_headers' => static function (): void {
+                throw new CanceledException();
+            }]];
+        }];
+    }
+
+    /**
+     * @dataProvider wrappedCancellationProvider
+     */
+    public function testApplicationFailuresCarryingACancellationStayWrapped(array $options): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'body')]);
+
+        try {
+            (new StreamHandler())(new Request('GET', Server::$url), $options)->wait();
+            self::fail('Expected the application failure');
+        } catch (RequestException $e) {
+            self::assertSame('Application failure', $e->getPrevious()->getMessage());
+        }
+    }
+
+    public static function wrappedCancellationProvider(): iterable
+    {
+        $fail = static function (): void {
+            throw new \RuntimeException('Application failure', 0, new CanceledException());
+        };
+
+        yield 'custom sink' => [['sink' => FnStream::decorate(Psr7\Utils::streamFor(''), ['write' => $fail])]];
+        yield 'on_headers' => [['on_headers' => $fail]];
+    }
+
     private static function assertResponseContentLengthPlatformException(ResponseException $e): void
     {
         self::assertNotInstanceOf(ResponseTransferException::class, $e);
@@ -6627,7 +6820,7 @@ class StreamHandlerTest extends TestCase
             $method->setAccessible(true);
         }
 
-        return $method->invoke($handler, $request, $options, $stream, $headers, Clock::now(), null);
+        return $method->invoke($handler, $request, $options, $stream, $headers, Clock::now(), null, new StreamCancellation());
     }
 
     public function testProtocolsOptionRejectsDisallowedStreamScheme(): void

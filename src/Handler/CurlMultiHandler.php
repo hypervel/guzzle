@@ -18,6 +18,7 @@ use GuzzleHttp\Psr7;
 use GuzzleHttp\TransportSharing;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
+use Swoole\Coroutine\CanceledException;
 
 /**
  * Returns an asynchronous response using curl_multi_* functions.
@@ -409,6 +410,16 @@ final class CurlMultiHandler
                         : new RequestException($message, $easy->request);
 
                     $promise->reject($failure);
+                } catch (\Throwable $e) {
+                    // The promise is rejected with this failure, so its
+                    // transfer must not keep running unobserved.
+                    try {
+                        $this->cancel($id, $waitToken);
+                    } catch (\Throwable $cleanupFailure) {
+                        // Preserve the original failure.
+                    }
+
+                    throw $e;
                 } finally {
                     --$this->activeCalls;
                     $this->notifyIdle();
@@ -909,10 +920,10 @@ final class CurlMultiHandler
             return;
         }
 
-        if ($this->active && \curl_multi_select($this->getMultiHandle(), $this->effectiveSelectTimeout()) === -1) {
+        if ($this->active && $this->select($this->effectiveSelectTimeout()) === -1) {
             // Perform a usleep if a select returns -1.
             // See: https://bugs.php.net/bug.php?id=61141
-            \usleep(250);
+            Clock::sleep(250);
         }
 
         do {
@@ -924,11 +935,32 @@ final class CurlMultiHandler
 
             // Prevent busy looping for slow HTTP requests.
             if ($exec === \CURLM_CALL_MULTI_PERFORM) {
-                \curl_multi_select($this->getMultiHandle(), $this->effectiveSelectTimeout());
+                $this->select($this->effectiveSelectTimeout());
             }
         } while ($exec === \CURLM_CALL_MULTI_PERFORM);
 
         $this->processMessages();
+    }
+
+    /**
+     * Waits for activity on the transfers.
+     *
+     * @throws CanceledException when canceling the owning coroutine interrupts
+     *                           the wait
+     */
+    private function select(float $timeout): int
+    {
+        $multiHandle = $this->getMultiHandle();
+        \swoole_clear_error();
+        $selected = \curl_multi_select($multiHandle, $timeout);
+
+        // Swoole's hooked select runs no PHP code, so nothing else can have
+        // changed the coroutine's cancellation state since the wait.
+        if (CoroutineCancellation::interrupted(\SWOOLE_ERROR_CO_CANCELED)) {
+            throw new CanceledException('Waiting for the cURL multi handler was canceled.');
+        }
+
+        return $selected;
     }
 
     /**

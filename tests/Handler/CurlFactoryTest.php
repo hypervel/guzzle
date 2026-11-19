@@ -406,7 +406,10 @@ class CurlFactoryTest extends TestCase
 
         $option = (int) \constant('CURLOPT_PREREQFUNCTION');
         $ok = (int) \constant('CURL_PREREQFUNC_OK');
-        $callback = static function () use ($ok): int {
+        $received = null;
+        $callback = static function (...$arguments) use ($ok, &$received): int {
+            $received = $arguments;
+
             return $ok;
         };
 
@@ -418,7 +421,9 @@ class CurlFactoryTest extends TestCase
         ]);
 
         try {
-            self::assertSame($callback, $_SERVER['_curl'][$option]);
+            self::assertSame($ok, $_SERVER['_curl'][$option]('handle', '127.0.0.1', '127.0.0.2', 80, 54321));
+            self::assertSame(['handle', '127.0.0.1', '127.0.0.2', 80, 54321], $received);
+            self::assertFalse($easy->prerequestAborted);
         } finally {
             $factory->release($easy);
         }

@@ -30,9 +30,12 @@ use GuzzleHttp\Tests\UnvalidatedUriRequest;
 use GuzzleHttp\TransportSharing;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
+use Swoole\Coroutine\CanceledException;
 
 class CurlMultiHandlerTest extends TestCase
 {
+    use RunsInCoroutines;
+
     public function setUp(): void
     {
         $_SERVER['curl_test'] = true;
@@ -2264,6 +2267,78 @@ class CurlMultiHandlerTest extends TestCase
         if ($prereqOption !== null) {
             self::assertArrayNotHasKey($prereqOption, $_SERVER['_curl']);
         }
+    }
+
+    /**
+     * @dataProvider failedWaitProvider
+     */
+    public function testFailedWaitRemovesOnlyItsTransfer(callable $interrupt, array $options, array $siblingOptions, string $expected): void
+    {
+        $failure = null;
+        $state = null;
+        $remaining = null;
+        $sibling = null;
+        $siblingBody = null;
+
+        self::runInCoroutine(static function () use ($interrupt, $options, $siblingOptions, &$failure, &$state, &$remaining, &$sibling, &$siblingBody): void {
+            // Accepts connections without ever answering.
+            $silent = \stream_socket_server('tcp://127.0.0.1:0');
+            $server = new \Swoole\Coroutine\Http\Server('127.0.0.1', 0);
+            $server->handle('/', static function ($request, $response): void {
+                \Swoole\Coroutine::sleep(0.2);
+                $response->end('sibling');
+            });
+            \Swoole\Coroutine::create(static function () use ($server): void {
+                $server->start();
+            });
+
+            try {
+                $handler = new CurlMultiHandler();
+                $promise = $handler(new Request('GET', 'http://'.\stream_socket_get_name($silent, false).'/'), $options + ['timeout' => 5]);
+                $sibling = $handler(new Request('GET', 'http://127.0.0.1:'.$server->port.'/'), $siblingOptions + ['timeout' => 5]);
+
+                $interrupt();
+                try {
+                    $promise->wait();
+                } catch (\Throwable $e) {
+                    $failure = $e;
+                }
+
+                $state = $promise->getState();
+                $remaining = \array_column(self::readMultiProperty($handler, 'handles'), 'deferred');
+                $siblingBody = (string) $sibling->wait()->getBody();
+            } finally {
+                // A running server would keep the scheduler from returning.
+                $server->shutdown();
+                \fclose($silent);
+            }
+        });
+
+        self::assertInstanceOf($expected, $failure);
+        self::assertSame(P\PromiseInterface::REJECTED, $state);
+        self::assertSame([$sibling], $remaining);
+        self::assertSame('sibling', $siblingBody);
+    }
+
+    public static function failedWaitProvider(): iterable
+    {
+        $staleThenCancel = static function (): void {
+            // A cancellation the coroutine handled leaves its flag set.
+            self::cancelCurrentCoroutineAfter(0.01);
+            (new \Swoole\Coroutine\Channel())->pop(5);
+            self::cancelCurrentCoroutineAfter(0.05);
+        };
+
+        yield 'canceled select' => [$staleThenCancel, [], [], CanceledException::class];
+        yield 'canceled delay' => [$staleThenCancel, ['delay' => 5000], ['delay' => 100], CanceledException::class];
+        yield 'thrown cancellation' => [static function (): void {
+            self::cancelCurrentCoroutineAfter(0.05, true);
+        }, [], [], CanceledException::class];
+        yield 'failing queued task' => [static function (): void {
+            P\Utils::queue()->add(static function (): void {
+                throw new \RuntimeException('Queued task failed.');
+            });
+        }, [], [], \RuntimeException::class];
     }
 
     public function testCanCancelFromProgressCallback(): void
@@ -5042,40 +5117,6 @@ class CurlMultiHandlerTest extends TestCase
                 $this->tracked[] = $promise;
             }
         };
-    }
-
-    /**
-     * Runs the callback in a coroutine scheduler with its own task queue. A
-     * coroutine that drains the shared queue would also run tasks left by
-     * other tests. The scheduler leaves Swoole's runtime hooks enabled, so they
-     * are restored for the tests that follow. Call the test server's control
-     * methods, such as Server::enqueue(), outside the callback: its client
-     * reuses cURL handles created without the hooks, which the hooked cURL
-     * functions reject.
-     */
-    private static function runInCoroutine(callable $callback): void
-    {
-        $queue = P\Utils::queue();
-        $hookFlags = \Swoole\Runtime::getHookFlags();
-        P\Utils::queue(new P\TaskQueue(false));
-        $failure = null;
-
-        try {
-            \Swoole\Coroutine\run(static function () use ($callback, &$failure): void {
-                try {
-                    $callback();
-                } catch (\Throwable $e) {
-                    $failure = $e;
-                }
-            });
-        } finally {
-            \Swoole\Runtime::setHookFlags($hookFlags);
-            P\Utils::queue($queue);
-        }
-
-        if ($failure !== null) {
-            throw $failure;
-        }
     }
 
     /**

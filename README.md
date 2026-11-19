@@ -38,6 +38,9 @@ Guzzle client, including clients that SDKs create. This fork adds:
   send requests through it, tick, run or close it, or wait on or cancel its
   transfers: those calls throw a `LogicException` without changing the handler.
   See [Coroutine Ownership](docs/handlers.md#coroutine-ownership).
+- **Coroutine cancellation.** Canceling a coroutine interrupts the request it is
+  waiting on and reports Swoole's `CanceledException` instead of a transfer
+  error. See [Coroutine Cancellation](docs/handlers.md#coroutine-cancellation).
 - **Transfer tracking.** When the promise task queue implements
   `ScopedTaskQueueInterface` from
   [`hypervel/guzzle-promises`](https://github.com/hypervel/guzzle-promises), the
@@ -74,7 +77,7 @@ composer require hypervel/guzzle
 
 ## Version Guidance
 
-This fork requires PHP 8.4 or newer and the Swoole extension.
+This fork requires PHP 8.4 or newer and Swoole 6.3.0 RC2 or a later 6.x release.
 [composer.json](composer.json) lists the exact requirements. Each fork version
 is the upstream release it is based on plus a fork release number. For example,
 `8.2.0.1` is the first fork release based on upstream `8.2.0`.

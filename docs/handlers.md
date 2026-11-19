@@ -284,6 +284,38 @@ one coroutine at a time. Capped clients keep one multi handler so the limits
 apply across all their requests. Requests with `stream` enabled use
 `StreamHandler`, which rejects them when connection caps are configured.
 
+### Coroutine Cancellation
+
+Canceling a Swoole coroutine interrupts the request it is waiting on. The
+built-in handlers then report the `Swoole\Coroutine\CanceledException` instead
+of a transfer error, whether or not `Swoole\Coroutine::cancel()` was asked to
+throw. This includes a cancellation thrown into a callback such as `on_headers`,
+`progress` or `on_trailers`, into a read of the request body or into a write to
+the `sink`. An application exception that carries a cancellation keeps its own
+meaning, as does a failure from a custom stream implementation. An interrupted
+request delay throws the cancellation.
+
+- `CurlHandler` releases the transfer and reports the cancellation to
+  `on_stats`. If `curl_exec()` itself throws the cancellation, it leaves the
+  handler call, so promise-based middleware such as retries never handles it.
+  Any other cancellation rejects the promise. Reading a request body smaller
+  than 1 MB happens before the transfer starts, so a cancellation there is
+  thrown. When the coroutine is canceled without an exception, a transfer
+  created by a custom `handle_factory` keeps its cURL error, because the
+  factory's callbacks can abort a transfer with the error Swoole reports for
+  that cancellation.
+- `CurlMultiHandler` throws it from `tick()` and `execute()` and leaves the
+  pending transfers running. Waiting on a promise instead rejects the promise
+  with it and removes the promise's transfer; other transfers stay pending. A
+  transfer whose callback, body read or sink write is canceled rejects with the
+  cancellation after reporting it to `on_stats`. Like `CurlHandler`, it throws
+  when reading a request body smaller than 1 MB is interrupted.
+- `StreamHandler` reports it to `on_stats` and rejects with it. Reading a
+  streamed body throws it.
+
+The cancellation does not implement `Psr\Http\Client\ClientExceptionInterface`,
+so it also escapes PSR-18 `sendRequest()` unwrapped.
+
 ## Transport Sharing
 
 By default, Guzzle does not ask handlers to share low-level transport state.
