@@ -125,9 +125,10 @@ final class CurlHandler
 
         $easy->errno = \curl_errno($easy->handle);
 
-        // @TODO: Preserve error 42 for custom factories until Swoole
-        // distinguishes an interrupted curl_exec() from a callback abort on the
-        // same transfer.
+        // Swoole reports a canceled wait and a callback abort as the same error
+        // 42. Only the built-in factory records its callbacks' aborts, so a
+        // custom factory's error 42 stays an ordinary transfer failure.
+        // Throwing cancellation reaches the catch above with any factory.
         if (CurlFactory::wasCanceled($easy)
             && $this->factory instanceof CurlFactory
             && \Swoole\Coroutine::getCid() > 0
