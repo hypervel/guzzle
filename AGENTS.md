@@ -126,6 +126,8 @@ sections of the README and `UPGRADING.md` describe the fork; the rest of
   runtime requirements are defined in `composer.json`. Preserve upstream's
   source style and formatting, including attribute placement and parameter
   commas; avoid unrelated syntax modernization.
+- Match this fork's `require.ext-swoole` constraint to the one in the root
+  `composer.json` of the `hypervel/components` version this branch supports.
 - Regenerate `phpstan-baseline.neon` with
   `make static-phpstan-update-baseline` whenever an upstream merge conflicts in
   it. Investigate new errors before accepting baseline changes.
