@@ -99,6 +99,12 @@ final class EasyHandle
     public bool $progressAborted = false;
 
     /**
+     * @var bool Whether a CURLOPT_PREREQFUNCTION callback from the "curl"
+     *           request option aborted the transfer
+     */
+    public bool $prerequestAborted = false;
+
+    /**
      * @var \Throwable|null Exception during createResponse (if any)
      */
     public ?\Throwable $createResponseException = null;

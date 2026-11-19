@@ -32,6 +32,7 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UriInterface;
+use Swoole\Coroutine\CanceledException;
 
 /**
  * HTTP handler that uses PHP's HTTP stream wrapper.
@@ -240,7 +241,8 @@ final class StreamHandler
             }
 
             $deadline = null;
-            $stream = $this->createStream($request, $options, $body, $deadline);
+            $cancellation = new StreamCancellation();
+            $stream = $this->createStream($request, $options, $body, $cancellation, $deadline);
             $headers = \stream_get_meta_data($stream)['wrapper_data'];
 
             return $this->createResponse(
@@ -249,7 +251,8 @@ final class StreamHandler
                 $stream,
                 \is_array($headers) ? $headers : [],
                 $startTime,
-                $deadline
+                $deadline,
+                $cancellation
             );
         } catch (\InvalidArgumentException $e) {
             throw $e;
@@ -258,7 +261,7 @@ final class StreamHandler
                 throw $e;
             }
 
-            if (!$e instanceof TransferException) {
+            if (!$e instanceof TransferException && !$e instanceof CanceledException) {
                 $message = $e->getMessage();
                 $e = self::createStreamFailureException($message, $request, $e, []);
             }
@@ -406,7 +409,8 @@ final class StreamHandler
         #[\SensitiveParameter]
         array $hdrs,
         ?float $startTime,
-        ?float $deadline
+        ?float $deadline,
+        StreamCancellation $cancellation
     ): PromiseInterface {
         try {
             [$ver, $status, $reason, $headers] = HeaderProcessor::parseHeaders($hdrs);
@@ -445,6 +449,10 @@ final class StreamHandler
         $stream = $streamFactory->createStreamFromResource($stream);
         if ($framingFailure === null && $deadline !== null && empty($options['stream'])) {
             $stream = self::createDeadlineSource($stream, $resource, $deadline, $options);
+        } elseif (\get_class($stream) === Psr7\Stream::class) {
+            // Only the stock stream's read is known to be a single blocking
+            // read of the transport.
+            $stream = new CancelableTransportStream($stream, $cancellation);
         }
         if ($chunked || !empty($options['stream'])) {
             $stream = new TransportStream($stream);
@@ -518,7 +526,9 @@ final class StreamHandler
             try {
                 $options['on_headers']($response, $request);
             } catch (\Throwable $e) {
-                $reason = new ResponseException('An error was encountered during the on_headers event', $request, $response, $e);
+                $reason = $e instanceof CanceledException
+                    ? $e
+                    : new ResponseException('An error was encountered during the on_headers event', $request, $response, $e);
                 $this->invokeStats($options, $request, $startTime, $response, $reason);
 
                 /** @var PromiseInterface<ResponseInterface, mixed> */
@@ -538,9 +548,13 @@ final class StreamHandler
                 // a fully received no-content response.
             }
         } elseif ($sink !== $stream) {
+            // A caller's resource sink is decorated, but writes to a stock
+            // stream.
+            $stockSink = (isset($options['sink']) && \is_resource($options['sink']))
+                || CoroutineCancellation::isStockStream($sink);
             try {
-                $this->drain($request, $response, $stream, $sink, $declaredLength, $encodedBody);
-            } catch (ResponseException $e) {
+                $this->drain($request, $response, $stream, $sink, $stockSink, $declaredLength, $encodedBody);
+            } catch (ResponseException|CanceledException $e) {
                 $this->invokeStats($options, $request, $startTime, $response, $e);
 
                 /** @var PromiseInterface<ResponseInterface, mixed> */
@@ -731,6 +745,8 @@ final class StreamHandler
      * Drains the source stream into the "sink" client option.
      *
      * @throws \RuntimeException when the sink option is invalid.
+     * @throws CanceledException when canceling the coroutine interrupts reading
+     *                           or writing the response body.
      */
     private function drain(
         #[\SensitiveParameter]
@@ -739,6 +755,7 @@ final class StreamHandler
         ResponseInterface $response,
         StreamInterface $source,
         StreamInterface $sink,
+        bool $stockSink,
         ?string $declaredResponseBodyLength,
         ?EncodedBodyStream $encodedBody = null
     ): StreamInterface {
@@ -748,13 +765,13 @@ final class StreamHandler
             $copyLimit = $encodedBody === null ? $declaredLength ?? -1 : -1;
 
             try {
-                $target = $this->createResponseSink($request, $response, $sink);
+                $target = $this->createResponseSink($request, $response, $sink, $stockSink);
                 // If a content-length header is provided, then stop reading once
                 // that number of bytes has been read. This can prevent infinitely
                 // reading from a stream when dealing with servers that do not
                 // honor Connection: Close headers.
                 $copied = Psr7\Utils::copyToStream($source, $target, $copyLimit);
-            } catch (ResponseException $e) {
+            } catch (ResponseException|CanceledException $e) {
                 throw $e;
             } catch (TimeoutException $e) {
                 throw new ResponseTimeoutException(
@@ -811,12 +828,13 @@ final class StreamHandler
     private function createResponseSink(
         RequestInterface $request,
         ResponseInterface $response,
-        StreamInterface $sink
+        StreamInterface $sink,
+        bool $stockSink
     ): StreamInterface {
         return Psr7\FnStream::decorate($sink, [
             'close' => static function (): void {
             },
-            'write' => static function (string $data) use ($request, $response, $sink): int {
+            'write' => static function (string $data) use ($request, $response, $sink, $stockSink): int {
                 try {
                     $written = $sink->write($data);
                 } catch (TimeoutException $e) {
@@ -827,6 +845,11 @@ final class StreamHandler
                         $e
                     );
                 } catch (\Exception $e) {
+                    $cancellation = CoroutineCancellation::fromStreamFailure($e, $stockSink);
+                    if ($cancellation !== null) {
+                        throw $cancellation;
+                    }
+
                     throw new ResponseException(
                         $e->getMessage() !== '' ? $e->getMessage() : 'Failed to write the response body',
                         $request,
@@ -928,6 +951,7 @@ final class StreamHandler
         #[\SensitiveParameter]
         array $options,
         string $body,
+        StreamCancellation $cancellation,
         ?float &$deadline
     ) {
         // Report a stream-open failure against the request passed here, not the
@@ -1007,6 +1031,10 @@ final class StreamHandler
 
         $uri = $this->resolveHost($request, $options);
 
+        if (isset($params['notification'])) {
+            $params['notification'] = $cancellation->wrapNotification($params['notification']);
+        }
+
         $contextResource = $this->createResource(
             static function () use ($context, $params) {
                 return \stream_context_create($context, $params);
@@ -1014,7 +1042,7 @@ final class StreamHandler
         );
 
         try {
-            $resource = $this->createResource(function () use ($uri, $contextResource, $idleTimeout, $timeout, &$deadline) {
+            $resource = $this->createResource(function () use ($uri, $contextResource, $idleTimeout, $timeout, $cancellation, &$deadline) {
                 $deadline = $timeout > 0 ? Clock::now() + $timeout / 1000 : null;
 
                 // Blank the from ini setting for the transfer so ambient
@@ -1031,6 +1059,7 @@ final class StreamHandler
                     }
                 }
                 try {
+                    $cancellation->begin();
                     $resource = @\fopen((string) $uri, 'r', false, $contextResource);
                 } finally {
                     if ($blankFrom && --self::$fromBlankDepth === 0 && self::$fromToRestore !== false) {
@@ -1039,6 +1068,10 @@ final class StreamHandler
                 }
 
                 if (false === $resource) {
+                    if ($cancellation->interrupted()) {
+                        throw new CanceledException('Opening the stream was canceled.');
+                    }
+
                     return false;
                 }
 

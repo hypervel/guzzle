@@ -31,6 +31,7 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UriInterface;
+use Swoole\Coroutine\CanceledException;
 
 /**
  * Creates curl resources from a request
@@ -318,6 +319,21 @@ final class CurlFactory implements CurlFactoryInterface
         // Add handler options from the request configuration options
         if (isset($options['curl'])) {
             $conf = \array_replace($conf, $options['curl']);
+
+            // A pre-request abort reports the same error as Swoole's coroutine
+            // cancellation, so record it to tell the two apart.
+            $prerequest = \defined('CURLOPT_PREREQFUNCTION') ? (int) \constant('CURLOPT_PREREQFUNCTION') : null;
+            if ($prerequest !== null && isset($conf[$prerequest]) && \is_callable($conf[$prerequest])) {
+                $callback = $conf[$prerequest];
+                $conf[$prerequest] = static function (...$arguments) use ($easy, $callback) {
+                    $result = $callback(...$arguments);
+                    if ($result !== \constant('CURL_PREREQFUNC_OK')) {
+                        $easy->prerequestAborted = true;
+                    }
+
+                    return $result;
+                };
+            }
         }
 
         self::normalizeStringableProxyCredentialOptions($conf);
@@ -1042,6 +1058,20 @@ final class CurlFactory implements CurlFactoryInterface
         EasyHandle $easy,
         CurlFactoryInterface $factory
     ): PromiseInterface {
+        // Same order as createRejection(), which matters because libcurl's
+        // final progress update can record a failure after another callback
+        // stopped the transfer.
+        $callbackFailure = $easy->onHeadersException
+            ?? $easy->progressException
+            ?? $easy->bodyReadException
+            ?? $easy->sinkWriteException;
+        if ($callbackFailure instanceof CanceledException) {
+            self::finishCanceled($easy, $factory, $callbackFailure);
+
+            /** @var PromiseInterface<ResponseInterface, mixed> */
+            return P\Create::rejectionFor($callbackFailure);
+        }
+
         /** @var (callable(TransferStats): mixed)|null $onStats */
         $onStats = $easy->options['on_stats'] ?? null;
         $stats = $onStats !== null ? self::createStats($easy) : null;
@@ -1094,7 +1124,7 @@ final class CurlFactory implements CurlFactoryInterface
             try {
                 $onTrailers(self::headersFromTrailerLines($easy->trailers), $response, $easy->request);
             } catch (\Throwable $e) {
-                $reason = new ResponseException(
+                $reason = $e instanceof CanceledException ? $e : new ResponseException(
                     'An error was encountered during the on_trailers event',
                     $easy->request,
                     $response,
@@ -1102,8 +1132,8 @@ final class CurlFactory implements CurlFactoryInterface
                 );
 
                 if ($onStats !== null && $stats !== null) {
-                    // Report the ResponseException rather than errno 0 to match
-                    // the response finalization stats above.
+                    // Report the failure rather than errno 0 to match the
+                    // response finalization stats above.
                     $onStats(new TransferStats(
                         $easy->request,
                         $response,
@@ -1126,9 +1156,52 @@ final class CurlFactory implements CurlFactoryInterface
         return P\Create::promiseFor($response);
     }
 
+    /**
+     * Returns whether Swoole's hooked curl_exec() abandoned the transfer
+     * because the calling coroutine was canceled.
+     *
+     * Swoole reports the cancellation as CURLE_ABORTED_BY_CALLBACK. Every
+     * callback this factory installs that can abort a transfer records why,
+     * so an abort without a recorded reason can only be the cancellation.
+     *
+     * @internal
+     */
+    public static function wasCanceled(EasyHandle $easy): bool
+    {
+        return $easy->errno === \CURLE_ABORTED_BY_CALLBACK
+            && !$easy->progressAborted
+            && !$easy->prerequestAborted
+            && $easy->progressException === null
+            && !self::hasLocalFailure($easy);
+    }
+
+    /**
+     * Releases a transfer abandoned for a canceled coroutine and reports its
+     * statistics with the cancellation.
+     *
+     * @internal
+     */
+    public static function finishCanceled(
+        #[\SensitiveParameter]
+        EasyHandle $easy,
+        CurlFactoryInterface $factory,
+        CanceledException $cancellation
+    ): void {
+        /** @var (callable(TransferStats): mixed)|null $onStats */
+        $onStats = $easy->options['on_stats'] ?? null;
+        $stats = $onStats !== null ? self::createStats($easy, $cancellation) : null;
+
+        $factory->release($easy);
+
+        if ($onStats !== null && $stats !== null) {
+            $onStats($stats);
+        }
+    }
+
     private static function createStats(
         #[\SensitiveParameter]
-        EasyHandle $easy
+        EasyHandle $easy,
+        ?CanceledException $cancellation = null
     ): TransferStats {
         $curlStats = \curl_getinfo($easy->handle);
         $curlStats['appconnect_time'] = \curl_getinfo($easy->handle, \CURLINFO_APPCONNECT_TIME);
@@ -1140,7 +1213,7 @@ final class CurlFactory implements CurlFactoryInterface
             ];
         }
 
-        $handlerErrorData = $easy->responseHeaderException ?? $easy->responseBodySizeException ?? $easy->errno;
+        $handlerErrorData = $cancellation ?? $easy->responseHeaderException ?? $easy->responseBodySizeException ?? $easy->errno;
 
         return new TransferStats(
             $easy->request,
@@ -2367,13 +2440,14 @@ final class CurlFactory implements CurlFactoryInterface
              * @return int|string
              */
             $remaining = $contentLength;
+            $stockBody = CoroutineCancellation::isStockStream($body);
             $conf[\CURLOPT_READFUNCTION] = static function (
                 #[\SensitiveParameter]
                 $ch,
                 #[\SensitiveParameter]
                 $fd,
                 int $length
-            ) use ($easy, $body, &$remaining) {
+            ) use ($easy, $body, $stockBody, &$remaining) {
                 if ($remaining === 0) {
                     return '';
                 }
@@ -2387,7 +2461,7 @@ final class CurlFactory implements CurlFactoryInterface
 
                     return self::CURL_READFUNC_ABORT;
                 } catch (\Throwable $e) {
-                    $easy->bodyReadException = $e;
+                    $easy->bodyReadException = CoroutineCancellation::fromStreamFailure($e, $stockBody) ?? $e;
 
                     return self::CURL_READFUNC_ABORT;
                 }
@@ -2643,7 +2717,9 @@ final class CurlFactory implements CurlFactoryInterface
             $sink = new LazyOpenStream($sink, 'w+');
         }
         $easy->sink = $sink;
-        $conf[\CURLOPT_WRITEFUNCTION] = static function ($ch, string $write) use ($easy, $sink): int {
+        // A caller's resource sink is decorated, but writes to a stock stream.
+        $stockSink = ($hasSink && \is_resource($options['sink'])) || CoroutineCancellation::isStockStream($sink);
+        $conf[\CURLOPT_WRITEFUNCTION] = static function ($ch, string $write) use ($easy, $sink, $stockSink): int {
             $length = \strlen($write);
 
             try {
@@ -2665,7 +2741,7 @@ final class CurlFactory implements CurlFactoryInterface
 
                 return 0;
             } catch (\Throwable $e) {
-                $easy->sinkWriteException = $e;
+                $easy->sinkWriteException = CoroutineCancellation::fromStreamFailure($e, $stockSink) ?? $e;
 
                 return 0;
             }

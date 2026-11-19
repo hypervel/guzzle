@@ -13,9 +13,9 @@ fork.
 
 #### PHP Version and Dependencies
 
-This fork requires PHP 8.4 or newer and the Swoole extension. It requires
-`hypervel/guzzle-promises`, Hypervel's fork of `guzzlehttp/promises`, in place
-of `guzzlehttp/promises`; also read its
+This fork requires PHP 8.4 or newer and Swoole 6.3.0 RC2 or a later 6.x release.
+It requires `hypervel/guzzle-promises`, Hypervel's fork of
+`guzzlehttp/promises`, in place of `guzzlehttp/promises`; also read its
 [upgrade guide](https://github.com/hypervel/guzzle-promises/blob/3.1/UPGRADING.md).
 
 #### Multi Handler Ownership
@@ -32,6 +32,14 @@ still require one coroutine at a time. Wait on or cancel each transfer before
 its coroutine ends, unless the task queue implements
 `GuzzleHttp\Promise\ScopedTaskQueueInterface`, which cancels them. See
 [Coroutine Handlers](docs/handlers.md#coroutine-handlers).
+
+#### Coroutine Cancellation
+
+A request interrupted by canceling its coroutine reports
+`Swoole\Coroutine\CanceledException` instead of a Guzzle transfer exception,
+such as cURL error 42. It is not a `GuzzleException`, so handle it separately
+where a canceled request needs handling. See
+[Coroutine Cancellation](docs/handlers.md#coroutine-cancellation).
 
 #### Task Queues
 

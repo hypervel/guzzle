@@ -76,7 +76,7 @@ final class DeadlineSourceStream implements StreamInterface
             if ($this->readTimeout !== null) {
                 $wait = \min($wait, $this->readTimeout - ($now - $idleStart));
             }
-            \usleep((int) \ceil($wait * 1e6));
+            Clock::sleep((int) \ceil($wait * 1e6));
         }
     }
 }

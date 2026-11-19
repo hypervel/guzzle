@@ -22,21 +22,28 @@ use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\RequestOptions;
 use GuzzleHttp\Server\Server;
+use GuzzleHttp\Tests\CancelingStreamWrapper;
 use GuzzleHttp\Tests\Psr17SpyFactory;
 use GuzzleHttp\Tests\SpyResponse;
 use GuzzleHttp\Tests\SpyStream;
 use GuzzleHttp\Tests\StrictReadableResourceStreamFactory;
 use GuzzleHttp\Tests\UnvalidatedUri;
 use GuzzleHttp\Tests\UnvalidatedUriRequest;
+use GuzzleHttp\TransferStats;
 use GuzzleHttp\TransportSharing;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
+use Swoole\Coroutine;
+use Swoole\Coroutine\CanceledException;
+use Swoole\Coroutine\Channel;
 
 /**
  * @covers \GuzzleHttp\Handler\CurlHandler
  */
 class CurlHandlerTest extends TestCase
 {
+    use RunsInCoroutines;
+
     protected function getHandler(array $options = []): CurlHandler
     {
         return new CurlHandler($options);
@@ -501,6 +508,255 @@ class CurlHandlerTest extends TestCase
     {
         yield 'coding before chunked' => ['gzip, chunked', 'Invalid Transfer-Encoding response header: unsupported transfer coding "gzip"'];
         yield 'coding after chunked' => ['chunked, gzip', 'Invalid Transfer-Encoding response header: chunked is not the final transfer coding'];
+    }
+
+    /**
+     * @dataProvider cancellationProvider
+     */
+    public function testCancelingTheCoroutineStopsTheTransfer(bool $throwException): void
+    {
+        $handler = new CurlHandler();
+        $promise = null;
+        $exception = null;
+        $reported = [];
+        $elapsed = null;
+
+        self::runInCoroutine(static function () use ($handler, $throwException, &$promise, &$exception, &$reported, &$elapsed): void {
+            // Accepts connections without ever answering.
+            $server = \stream_socket_server('tcp://127.0.0.1:0');
+            $url = 'http://'.\stream_socket_get_name($server, false).'/';
+
+            // A cancellation the coroutine handled leaves its flag set.
+            self::cancelCurrentCoroutineAfter(0.01);
+            (new Channel())->pop(5);
+
+            self::cancelCurrentCoroutineAfter(0.05, $throwException);
+            $start = Clock::now();
+            try {
+                $promise = $handler(new Request('GET', $url), [
+                    'timeout' => 5,
+                    'on_stats' => static function (TransferStats $stats) use (&$reported): void {
+                        $reported[] = $stats->getHandlerErrorData();
+                    },
+                ]);
+                $promise->wait();
+            } catch (\Throwable $e) {
+                $exception = $e;
+            }
+            $elapsed = Clock::now() - $start;
+            \fclose($server);
+        });
+
+        // A thrown cancellation leaves the handler call itself, so
+        // promise-based middleware never handles it.
+        self::assertSame($throwException, $promise === null);
+        self::assertInstanceOf(CanceledException::class, $exception);
+        self::assertSame([$exception], $reported);
+        self::assertLessThan(1, $elapsed);
+        self::assertCount(1, self::readIdleHandles(self::readFactory($handler)));
+    }
+
+    public static function cancellationProvider(): iterable
+    {
+        yield 'without an exception' => [false];
+        yield 'with an exception' => [true];
+    }
+
+    public function testCancellationDuringTheFinalProgressUpdateStillStopsTheTransfer(): void
+    {
+        $exception = null;
+        $canceledUpdates = 0;
+
+        self::runInCoroutine(static function () use (&$exception, &$canceledUpdates): void {
+            $server = \stream_socket_server('tcp://127.0.0.1:0');
+            $url = 'http://'.\stream_socket_get_name($server, false).'/';
+
+            self::cancelCurrentCoroutineAfter(0.05);
+            try {
+                (new CurlHandler())(new Request('GET', $url), [
+                    'timeout' => 5,
+                    'progress' => static function () use (&$canceledUpdates): void {
+                        if (Coroutine::isCanceled()) {
+                            ++$canceledUpdates;
+                            // Coroutine I/O resets the cancellation flag.
+                            Coroutine::sleep(0.001);
+                        }
+                    },
+                ])->wait();
+            } catch (\Throwable $e) {
+                $exception = $e;
+            }
+            \fclose($server);
+        });
+
+        if ($canceledUpdates === 0) {
+            self::markTestSkipped('libcurl did not run a final progress update on premature removal.');
+        }
+
+        self::assertInstanceOf(CanceledException::class, $exception);
+    }
+
+    /**
+     * @dataProvider unexplainedAbortProvider
+     */
+    public function testAbortsWithoutProvenCancellationRemainCurlErrors(callable $createHandler): void
+    {
+        if (!\defined('CURLOPT_PREREQFUNCTION')) {
+            self::markTestSkipped('CURLOPT_PREREQFUNCTION is not available.');
+        }
+
+        Server::flush();
+        Server::enqueue([new Response(), new Response()]);
+        $prerequests = 0;
+        $canceledWhenAborting = null;
+        $exception = null;
+
+        $handler = $createHandler(static function () use (&$prerequests, &$canceledWhenAborting): int {
+            if (++$prerequests === 1) {
+                return (int) \constant('CURL_PREREQFUNC_OK');
+            }
+
+            // Canceling another coroutine records the same error as an
+            // interrupted transfer.
+            $canceledWhenAborting = Coroutine::isCanceled();
+            Coroutine::cancel(Coroutine::create(static function (): void {
+                Coroutine::sleep(1);
+            }));
+
+            return (int) \constant('CURL_PREREQFUNC_ABORT');
+        });
+
+        self::runInCoroutine(static function () use ($handler, &$exception): void {
+            $handler(new Request('GET', Server::$url), [])->wait();
+
+            // A cancellation the coroutine handled leaves its flag set, and
+            // the reused connection lets the transfer reach the callback
+            // without a wait that would reset it.
+            self::cancelCurrentCoroutineAfter(0.01);
+            (new Channel())->pop(5);
+            try {
+                $handler(new Request('GET', Server::$url), [])->wait();
+            } catch (\Throwable $e) {
+                $exception = $e;
+            }
+        });
+
+        self::assertTrue($canceledWhenAborting);
+        self::assertInstanceOf(RequestException::class, $exception);
+        self::assertStringStartsWith('cURL error 42: ', $exception->getMessage());
+    }
+
+    public static function unexplainedAbortProvider(): iterable
+    {
+        yield 'pre-request option' => [static function (callable $prerequest): callable {
+            $handler = new CurlHandler();
+
+            return static function (RequestInterface $request, array $options) use ($handler, $prerequest) {
+                return $handler($request, $options + [
+                    'curl' => [(int) \constant('CURLOPT_PREREQFUNCTION') => $prerequest],
+                ]);
+            };
+        }];
+        yield 'custom factory callback' => [static function (callable $prerequest): callable {
+            return new CurlHandler(['handle_factory' => new class($prerequest) implements CurlFactoryInterface {
+                /** @var callable */
+                private $prerequest;
+
+                private CurlFactory $factory;
+
+                public function __construct(callable $prerequest)
+                {
+                    $this->prerequest = $prerequest;
+                    $this->factory = new CurlFactory(1);
+                }
+
+                public function create(RequestInterface $request, array $options): EasyHandle
+                {
+                    $easy = $this->factory->create($request, $options);
+                    \curl_setopt($easy->handle, (int) \constant('CURLOPT_PREREQFUNCTION'), $this->prerequest);
+
+                    return $easy;
+                }
+
+                public function release(EasyHandle $easy): void
+                {
+                    $this->factory->release($easy);
+                }
+            }]);
+        }];
+    }
+
+    /**
+     * @dataProvider thrownCancellationProvider
+     */
+    public function testCancellationsThrownIntoTheTransferRejectWithThem(callable $createTransfer): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'body')]);
+        [$request, $options] = $createTransfer();
+        $handler = new CurlHandler();
+        $reported = [];
+
+        $promise = $handler($request, $options + [
+            'on_stats' => static function (TransferStats $stats) use (&$reported): void {
+                $reported[] = $stats->getHandlerErrorData();
+            },
+        ]);
+
+        try {
+            $promise->wait();
+            self::fail('Expected the cancellation');
+        } catch (CanceledException $e) {
+            self::assertSame([$e], $reported);
+        }
+
+        self::assertCount(1, self::readIdleHandles(self::readFactory($handler)));
+    }
+
+    public static function thrownCancellationProvider(): iterable
+    {
+        $throw = static function (): void {
+            throw new CanceledException();
+        };
+
+        yield 'file sink' => [static function (): array {
+            return [new Request('GET', Server::$url), ['sink' => CancelingStreamWrapper::open()]];
+        }];
+        yield 'file body' => [static function (): array {
+            return [new Request('PUT', Server::$url, [], Psr7\Utils::streamFor(CancelingStreamWrapper::open())), []];
+        }];
+        yield 'on_headers' => [static function () use ($throw): array {
+            return [new Request('GET', Server::$url), ['on_headers' => $throw]];
+        }];
+        yield 'on_trailers' => [static function () use ($throw): array {
+            return [new Request('GET', Server::$url), ['on_trailers' => $throw]];
+        }];
+    }
+
+    /**
+     * @dataProvider wrappedCancellationProvider
+     */
+    public function testApplicationFailuresCarryingACancellationStayWrapped(array $options): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200, [], 'body')]);
+
+        try {
+            (new CurlHandler())(new Request('GET', Server::$url), $options)->wait();
+            self::fail('Expected the application failure');
+        } catch (RequestException $e) {
+            self::assertSame('Application failure', $e->getPrevious()->getMessage());
+        }
+    }
+
+    public static function wrappedCancellationProvider(): iterable
+    {
+        $fail = static function (): void {
+            throw new \RuntimeException('Application failure', 0, new CanceledException());
+        };
+
+        yield 'custom sink' => [['sink' => Psr7\FnStream::decorate(Psr7\Utils::streamFor(''), ['write' => $fail])]];
+        yield 'on_headers' => [['on_headers' => $fail]];
     }
 
     private static function readFactory(CurlHandler $handler): CurlFactory

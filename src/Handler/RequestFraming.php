@@ -9,6 +9,7 @@ use GuzzleHttp\NonSerializableTrait;
 use GuzzleHttp\Psr7;
 use GuzzleHttp\Psr7\Exception\TimeoutException;
 use Psr\Http\Message\RequestInterface;
+use Swoole\Coroutine\CanceledException;
 
 /**
  * Validates and normalizes request framing before a handler performs I/O.
@@ -169,7 +170,9 @@ final class RequestFraming
      * Materializes the body, stopping at the selected Content-Length when
      * present.
      *
-     * @throws RequestException when the body cannot be fully rewound or read
+     * @throws RequestException  when the body cannot be fully rewound or read
+     * @throws CanceledException when canceling the coroutine interrupts reading
+     *                           the body
      */
     public function materialize(): string
     {
@@ -239,6 +242,9 @@ final class RequestFraming
         return $contents;
     }
 
+    /**
+     * @return RequestException|CanceledException
+     */
     private static function bodyException(
         #[\SensitiveParameter]
         RequestInterface $request,
@@ -246,7 +252,15 @@ final class RequestFraming
         \Exception $exception,
         string $timeoutMessage,
         string $fallbackMessage
-    ): RequestException {
+    ): \Exception {
+        $cancellation = CoroutineCancellation::fromStreamFailure(
+            $exception,
+            CoroutineCancellation::isStockStream($request->getBody())
+        );
+        if ($cancellation !== null) {
+            return $cancellation;
+        }
+
         $message = $exception instanceof TimeoutException
             ? $timeoutMessage
             : ($exception->getMessage() !== '' ? $exception->getMessage() : $fallbackMessage);
