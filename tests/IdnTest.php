@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GuzzleHttp\Tests;
 
+use GuzzleHttp\Exception\InvalidArgumentException;
 use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\Handler\HostValidator;
 use GuzzleHttp\Idn;
@@ -13,13 +14,108 @@ use PHPUnit\Framework\TestCase;
 class IdnTest extends TestCase
 {
     /**
-     * @requires extension idn
+     * @requires function idn_to_ascii
      */
     public function testConvertUri(): void
     {
         $uri = Psr7\Utils::uriFor('https://яндекс.рф/images');
         $uri = Idn::convertUri($uri);
         self::assertSame('xn--d1acpjx3f.xn--p1ai', $uri->getHost());
+    }
+
+    /**
+     * @requires extension intl
+     */
+    public function testConvertUriRejectsAHostLongerThan4096Bytes(): void
+    {
+        // The conversion ignores soft hyphens, so only the length differs.
+        $padding = str_repeat("\u{00AD}", 2042);
+        $uri = new Psr7\Uri('http://placeholder.test/');
+
+        self::assertSame('example.test', Idn::convertUri($uri->withHost($padding.'example.test'), \IDNA_DEFAULT)->getHost());
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('IDN conversion failed');
+
+        Idn::convertUri($uri->withHost($padding.'examples.test'), \IDNA_DEFAULT);
+    }
+
+    /**
+     * @requires extension intl
+     */
+    public function testConvertUriRejectsAnOverlongLabelWhenIntlThrowsExceptions(): void
+    {
+        // Maps to 1200 characters, more than ICU encodes in one label.
+        $uri = (new Psr7\Uri('http://placeholder.test/'))->withHost(str_repeat("\u{3316}", 200).'.example');
+        $useExceptions = \ini_set('intl.use_exceptions', '1');
+
+        try {
+            $this->expectException(InvalidArgumentException::class);
+            $this->expectExceptionMessage('IDN conversion failed');
+
+            Idn::convertUri($uri, \IDNA_DEFAULT);
+        } finally {
+            \ini_set('intl.use_exceptions', $useExceptions);
+        }
+    }
+
+    /**
+     * @requires function idn_to_ascii
+     */
+    public function testConvertUriRejectsAHostThatConvertsToAnInvalidHost(): void
+    {
+        // The fullwidth solidus maps to a solidus.
+        $uri = (new Psr7\Uri('http://placeholder.test/'))->withHost("evil.example\u{FF0F}.good.example");
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('IDN conversion failed');
+
+        Idn::convertUri($uri, \IDNA_DEFAULT);
+    }
+
+    /**
+     * @requires function idn_to_ascii
+     *
+     * @dataProvider uriStringProvider
+     */
+    public function testCreateUri(string $uri, string $expected): void
+    {
+        self::assertSame($expected, (string) Idn::createUri(new Psr7\HttpFactory(), $uri, \IDNA_DEFAULT));
+    }
+
+    /**
+     * @return iterable<string, array{0: string, 1: string}>
+     */
+    public static function uriStringProvider(): iterable
+    {
+        yield 'raw host between percent-encoded data' => ['https://%C3%BC@яндекс.рф/%D0%BF', 'https://%C3%BC@xn--d1acpjx3f.xn--p1ai/%D0%BF'];
+        yield 'percent-encoded host' => ['https://%D1%8F.%D1%80%D1%84/images', 'https://%D1%8F.%D1%80%D1%84/images'];
+        yield 'percent-encoded host without a scheme' => ['//%D1%8F.%D1%80%D1%84/images', '//%D1%8F.%D1%80%D1%84/images'];
+        yield 'lower-case percent-encoded host' => ['https://b%c3%bccher.example/', 'https://b%C3%BCcher.example/'];
+    }
+
+    /**
+     * @requires function idn_to_ascii
+     */
+    public function testConvertUriRejectsAnInvalidHostThatAnotherUriImplementationAccepts(): void
+    {
+        // Fullwidth forms map to URI delimiters.
+        $hosts = [
+            "good.example\u{FF20}evil.example",
+            "evil.example\u{FF0F}.good.example",
+            "evil.example\u{FF1F}.good.example",
+            "evil.example\u{FF03}.good.example",
+            "good.example\u{FF1A}8080",
+        ];
+
+        foreach ($hosts as $host) {
+            try {
+                Idn::convertUri(new UnvalidatedUri('http', $host), \IDNA_DEFAULT);
+                self::fail('An exception was not thrown');
+            } catch (InvalidArgumentException $e) {
+                self::assertSame('IDN conversion failed', $e->getMessage());
+            }
+        }
     }
 
     /**

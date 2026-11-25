@@ -255,6 +255,11 @@ final class CurlFactory implements CurlFactoryInterface
         $this->assertOpen();
         self::validateRequestUriScheme($request);
 
+        // A method with a NUL byte and no line break keeps the exception the failed curl_setopt() call throws.
+        if (\strpbrk($request->getMethod(), "\r\n") !== false || (\strpos($request->getMethod(), "\0") === false && 1 !== \preg_match('/^[a-zA-Z0-9\'`#$%&*+.^_|~!-]+$/D', $request->getMethod()))) {
+            throw new RequestException('HTTP method must be a valid HTTP token.', $request);
+        }
+
         $protocolVersion = $request->getProtocolVersion();
 
         if ('' === $protocolVersion) {
@@ -342,6 +347,7 @@ final class CurlFactory implements CurlFactoryInterface
             self::assertRequiredMultiplexAuthSupported($conf);
         }
 
+        self::assertSslOptionsSupported($request, $conf);
         self::applyProxyConnectHeaderSuppression($request, $conf);
         self::normalizeCurlHeaderOptions($conf);
         self::applyProxyAuthorizationHeaderHandling($request, $conf, $managedProxyAuthorization);
@@ -608,8 +614,42 @@ final class CurlFactory implements CurlFactoryInterface
             throw new InvalidArgumentException(\sprintf('The "%s" proxy scheme is not supported by the cURL handler.', Psr7\DiagnosticValue::escape($scheme)));
         }
 
+        // libcurl 7.76.0-8.17.0 skips a proxy with undecodable credentials.
+        if (\preg_match('/%[01][0-9A-Fa-f]/', \substr($selectedProxy, 0, (int) \strrpos($selectedProxy, '@'))) !== 0) {
+            throw new InvalidArgumentException('Proxy credentials must not contain percent-encoded control characters.');
+        }
+
+        // libcurl before 7.65.0 reads the proxy host after the first '@'.
+        if (\substr_count($selectedProxy, '@') > 1) {
+            throw new InvalidArgumentException('Invalid proxy URL.');
+        }
+
+        $authority = \explode('://', $selectedProxy, 2)[1] ?? $selectedProxy;
+        $host = \explode('@', $authority, 2)[1] ?? $authority;
+
+        // libcurl 7.47.0-7.51.0 skips a proxy with a host of '.'.
+        if (\preg_match('#^\.(?:[:/]|$)#D', $host) !== 0) {
+            throw new InvalidArgumentException('Invalid proxy URL.');
+        }
+
         if ($scheme === 'https' && !CurlVersion::supportsHttpsProxy()) {
             throw new RequestException('HTTPS proxies are not supported by the installed libcurl; libcurl 7.54.0 or newer built with HTTPS-proxy support is required.', $request);
+        }
+    }
+
+    /**
+     * @param array<int|string, mixed> $conf
+     */
+    private static function assertSslOptionsSupported(
+        #[\SensitiveParameter]
+        RequestInterface $request,
+        #[\SensitiveParameter]
+        array $conf
+    ): void {
+        // Rejected rather than isolated on a fresh connection: below 7.83.1
+        // libcurl's TLS session cache ignores SSL options as well.
+        if (\array_key_exists(\CURLOPT_SSL_OPTIONS, $conf) && !CurlVersion::supportsSslOptionsReuseMatching()) {
+            throw new RequestException('The CURLOPT_SSL_OPTIONS cURL option requires libcurl 7.83.1 or newer.', $request);
         }
     }
 
@@ -847,6 +887,7 @@ final class CurlFactory implements CurlFactoryInterface
         self::addSupportedCurlOption($options, 'CURLOPT_RESOLVE');
         self::addSupportedCurlOption($options, 'CURLOPT_SSL_CIPHER_LIST');
         self::addSupportedCurlOption($options, 'CURLOPT_SSL_EC_CURVES');
+        self::addSupportedCurlOption($options, 'CURLOPT_SSL_OPTIONS');
         self::addSupportedCurlOption($options, 'CURLOPT_TCP_FASTOPEN');
         self::addSupportedCurlOption($options, 'CURLOPT_TCP_KEEPALIVE');
         self::addSupportedCurlOption($options, 'CURLOPT_TCP_KEEPIDLE');
@@ -1597,7 +1638,44 @@ final class CurlFactory implements CurlFactoryInterface
             return $error;
         }
 
+        $authority = \strpos($proxy, '://') === false ? $proxy : \substr($proxy, \strpos($proxy, '://') + 3);
+        $userInfo = \substr($authority, 0, (int) \strrpos($authority, '@'));
+        $error = self::redactTruncatedProxyUserInfo($error, $userInfo);
+        $error = self::redactProxyUserInfoNamedAsHost($error, $userInfo);
+
         return Psr7\UriRedactor::redactUserInfoInString($error, $proxy);
+    }
+
+    private static function redactTruncatedProxyUserInfo(string $error, string $userInfo): string
+    {
+        // libcurl cuts errors at 255 bytes, which can drop the userinfo's "@".
+        if (\strlen($error) !== 255 || \strpos($error, $userInfo.'@') !== false) {
+            return $error;
+        }
+
+        for ($length = \min(\strlen($userInfo), 255); $length > 0; --$length) {
+            if (\substr_compare($error, $userInfo, -$length, $length) === 0) {
+                return \substr($error, 0, -$length).'***';
+            }
+        }
+
+        return $error;
+    }
+
+    private static function redactProxyUserInfoNamedAsHost(string $error, string $userInfo): string
+    {
+        // Older libcurl takes what follows the first "@" for the proxy host.
+        $head = (string) \strstr($userInfo, '@', true);
+        $rest = \ltrim((string) \strstr($userInfo, '@'), '@');
+
+        if ($rest === '' || \strpos($error, '://') !== false || \strpos($error, $head.'@') !== false) {
+            return $error;
+        }
+
+        // libcurl 7.80.0 to 7.83.0 percent-decodes the host twice.
+        $decoded = \rawurldecode($rest);
+
+        return \str_replace([$rest.'@', $decoded.'@', \rawurldecode($decoded).'@'], '***@', $error);
     }
 
     /**
@@ -2581,6 +2659,15 @@ final class CurlFactory implements CurlFactoryInterface
 
             foreach ($values as $value) {
                 $value = (string) $value;
+                if (\strpos("$name$value", "\0") !== false) {
+                    throw new RequestException('Request header fields must not contain a NUL byte.', $easy->request);
+                }
+
+                // A field with a line break keeps the exception normalizeCurlHeaderOptions() throws.
+                if (\strpbrk("$name$value", "\r\n") === false && 1 !== \preg_match('/^[a-zA-Z0-9\'`#$%&*+.^_|~!-]+$/D', (string) $name)) {
+                    throw new RequestException('Request header names must be valid HTTP tokens.', $easy->request);
+                }
+
                 if ($value === '') {
                     // cURL requires a special format for empty headers.
                     // See https://github.com/guzzle/guzzle/issues/1882 for more details.
@@ -2608,8 +2695,6 @@ final class CurlFactory implements CurlFactoryInterface
         foreach (\array_keys($options['_headers']) as $key) {
             if (Psr7\Utils::caselessEquals((string) $key, $name)) {
                 unset($options['_headers'][$key]);
-
-                return;
             }
         }
     }

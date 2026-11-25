@@ -214,6 +214,44 @@ class StreamHandlerTest extends TestCase
     }
 
     /**
+     * @dataProvider invalidMethodProvider
+     */
+    public function testRejectsInvalidMethod(string $method): void
+    {
+        $handler = new StreamHandler();
+        $request = self::requestWithMethod($method);
+
+        try {
+            $handler($request, []);
+            self::fail('Expected request exception.');
+        } catch (RequestException $e) {
+            self::assertSame($request, $e->getRequest());
+            self::assertNotInstanceOf(ResponseException::class, $e);
+            self::assertSame('HTTP method must be a valid HTTP token.', $e->getMessage());
+        }
+    }
+
+    public static function invalidMethodProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'crlf' => ["GET /other HTTP/1.1\r\nX-Injected: value\r\nX-Ignored:"];
+        yield 'line feed' => ["GET\n"];
+        yield 'carriage return' => ["GET\r/other"];
+        yield 'slash' => ['GET/other'];
+        yield 'space' => ['GET x'];
+        yield 'nul' => ["GE\0T"];
+    }
+
+    public function testSendsMethodWithEveryTokenCharacter(): void
+    {
+        $handler = new StreamHandler();
+        $response = $handler(self::requestWithMethod("aZ09!#$%&'*+-.^_`|~"), ['stream' => true])->wait();
+        $opts = \stream_context_get_options($response->getBody()->detach());
+
+        self::assertSame("aZ09!#$%&'*+-.^_`|~", $opts['http']['method']);
+    }
+
+    /**
      * @dataProvider invalidRequestContentLengthProvider
      *
      * @param string|string[] $contentLength
@@ -229,6 +267,66 @@ class StreamHandlerTest extends TestCase
         $this->expectExceptionMessage('Invalid Content-Length request header');
 
         $handler($request, []);
+    }
+
+    /**
+     * @dataProvider headerFieldWithLineBreakOrNulProvider
+     */
+    public function testDoesNotTransferAHeaderFieldWithALineBreakOrNulFromACustomRequest(string $name, string $value): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200)]);
+
+        $handler = new StreamHandler();
+        $request = self::requestWithUnvalidatedHeader($name, $value);
+
+        try {
+            $handler($request, [])->wait();
+            self::fail('An exception was not thrown');
+        } catch (RequestException $e) {
+            self::assertSame('Request header fields must not contain a carriage return, line feed or NUL byte.', $e->getMessage());
+        }
+
+        self::assertSame([], Server::received());
+    }
+
+    public static function headerFieldWithLineBreakOrNulProvider(): iterable
+    {
+        yield 'name with crlf' => ["X-Foo\r\nX-Injected", 'bar'];
+        yield 'name with nul' => ["X-Foo\0", 'bar'];
+        yield 'value with crlf' => ['X-Foo', "bar\r\nX-Injected: value"];
+        yield 'value with line feed' => ['X-Foo', "bar\nX-Injected: value"];
+        yield 'value with carriage return' => ['X-Foo', "bar\rX-Injected: value"];
+        yield 'value with nul' => ['X-Foo', "bar\0baz"];
+    }
+
+    /**
+     * @dataProvider invalidHeaderNameProvider
+     */
+    public function testDoesNotTransferAnInvalidHeaderNameFromACustomRequest(string $name): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200)]);
+
+        $handler = new StreamHandler();
+        $request = self::requestWithUnvalidatedHeader($name, 'bar');
+
+        try {
+            $handler($request, [])->wait();
+            self::fail('An exception was not thrown');
+        } catch (RequestException $e) {
+            self::assertSame('Request header names must be valid HTTP tokens.', $e->getMessage());
+        }
+
+        self::assertSame([], Server::received());
+    }
+
+    public static function invalidHeaderNameProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'colon' => ['Content-Length:'];
+        yield 'colon and value' => ['X-Other: value; X-Rest'];
+        yield 'trailing space' => ['Content-Length '];
     }
 
     /**
@@ -3879,6 +3977,22 @@ class StreamHandlerTest extends TestCase
         self::assertSame('DEFAULT', $opts['ssl']['ciphers']);
     }
 
+    public function testExcludesUriFragmentFromFullRequestUri(): void
+    {
+        $this->queueRes();
+        $handler = new StreamHandler();
+        $request = new Request('GET', Server::$url.'foo?baz=bar#fragment');
+        $response = $handler($request, [
+            'stream' => true,
+            'stream_context' => [
+                'http' => [
+                    'request_fulluri' => true,
+                ],
+            ],
+        ])->wait();
+        self::assertSame(Server::$url.'foo?baz=bar', $response->getBody()->getMetadata('uri'));
+    }
+
     public function testRejectsUnsupportedStreamContextOptions(): void
     {
         $this->expectException(\InvalidArgumentException::class);
@@ -6584,6 +6698,26 @@ class StreamHandlerTest extends TestCase
         }
     }
 
+    private static function requestWithMethod(string $method): RequestInterface
+    {
+        return new class($method) extends Request {
+            /** @var string */
+            private $unvalidatedMethod;
+
+            public function __construct(string $method)
+            {
+                parent::__construct('GET', Server::$url);
+
+                $this->unvalidatedMethod = $method;
+            }
+
+            public function getMethod(): string
+            {
+                return $this->unvalidatedMethod;
+            }
+        };
+    }
+
     private static function requestWithProtocolVersion(string $protocolVersion): RequestInterface
     {
         return new class($protocolVersion) extends Request {
@@ -6802,6 +6936,26 @@ class StreamHandlerTest extends TestCase
         yield 'on_headers' => [['on_headers' => $fail]];
     }
 
+    private static function requestWithUnvalidatedHeader(string $name, string $value): RequestInterface
+    {
+        return new class($name, $value) extends Request {
+            /** @var array<string, string[]> */
+            private $unvalidatedHeaders;
+
+            public function __construct(string $name, string $value)
+            {
+                parent::__construct('GET', Server::$url);
+
+                $this->unvalidatedHeaders = [$name => [$value]];
+            }
+
+            public function getHeaders(): array
+            {
+                return parent::getHeaders() + $this->unvalidatedHeaders;
+            }
+        };
+    }
+
     private static function assertResponseContentLengthPlatformException(ResponseException $e): void
     {
         self::assertNotInstanceOf(ResponseTransferException::class, $e);
@@ -6902,6 +7056,22 @@ class StreamHandlerTest extends TestCase
             'uppercase http scheme' => [
                 'HTTP://user:pass@proxy.example.com:8125',
                 ['proxy' => 'tcp://proxy.example.com:8125', 'auth' => 'Basic '.\base64_encode('user:pass')],
+            ],
+            'percent-encoded credentials' => [
+                'http://user%40example.org:p%40ss@proxy.example.com:8125',
+                ['proxy' => 'tcp://proxy.example.com:8125', 'auth' => 'Basic '.\base64_encode('user@example.org:p@ss')],
+            ],
+            'percent-encoded colon in username only' => [
+                'http://user%3Aname@proxy.example.com:8125',
+                ['proxy' => 'tcp://proxy.example.com:8125', 'auth' => 'Basic '.\base64_encode('user:name:')],
+            ],
+            'percent-encoded slash and percent sign decoded once' => [
+                'http://user:a%2Fb%2525@proxy.example.com:8125',
+                ['proxy' => 'tcp://proxy.example.com:8125', 'auth' => 'Basic '.\base64_encode('user:a/b%25')],
+            ],
+            'percent-encoded space and literal plus sign' => [
+                'http://user:a%20b+c@proxy.example.com:8125',
+                ['proxy' => 'tcp://proxy.example.com:8125', 'auth' => 'Basic '.\base64_encode('user:a b+c')],
             ],
             'raw transport unchanged' => [
                 'ssl://proxy.example.com:8125',

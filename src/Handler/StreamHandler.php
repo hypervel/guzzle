@@ -204,6 +204,10 @@ final class StreamHandler
             throw new RequestException('The stream handler cannot guarantee a multiplexed protocol; required multiplexing needs a cURL handler.', $request);
         }
 
+        if (1 !== \preg_match('/^[a-zA-Z0-9\'`#$%&*+.^_|~!-]+$/D', $request->getMethod())) {
+            throw new RequestException('HTTP method must be a valid HTTP token.', $request);
+        }
+
         $protocolVersion = $request->getProtocolVersion();
 
         if ('' === $protocolVersion) {
@@ -1060,7 +1064,7 @@ final class StreamHandler
                 }
                 try {
                     $cancellation->begin();
-                    $resource = @\fopen((string) $uri, 'r', false, $contextResource);
+                    $resource = @\fopen((string) $uri->withFragment(''), 'r', false, $contextResource);
                 } finally {
                     if ($blankFrom && --self::$fromBlankDepth === 0 && self::$fromToRestore !== false) {
                         \ini_set('from', self::$fromToRestore);
@@ -1463,6 +1467,15 @@ final class StreamHandler
             }
 
             foreach ($value as $val) {
+                $val = (string) $val;
+                if (\strpbrk("$name$val", "\r\n\0") !== false) {
+                    throw new RequestException('Request header fields must not contain a carriage return, line feed or NUL byte.', $request);
+                }
+
+                if (1 !== \preg_match('/^[a-zA-Z0-9\'`#$%&*+.^_|~!-]+$/D', (string) $name)) {
+                    throw new RequestException('Request header names must be valid HTTP tokens.', $request);
+                }
+
                 $headers .= "$name: $val\r\n";
             }
         }
@@ -1867,8 +1880,9 @@ final class StreamHandler
         $parsed = \parse_url(\strpos($url, '://') === false ? 'http://'.$url : $url);
         if (\is_array($parsed) && isset($parsed['host'])) {
             $port = $parsed['port'] ?? 1080;
-            $user = $parsed['user'] ?? '';
-            $pass = $parsed['pass'] ?? '';
+            // Each part is percent-decoded on its own, to match libcurl.
+            $user = \rawurldecode($parsed['user'] ?? '');
+            $pass = \rawurldecode($parsed['pass'] ?? '');
             $auth = ($user !== '' || $pass !== '') ? 'Basic '.\base64_encode("{$user}:{$pass}") : null;
 
             return [

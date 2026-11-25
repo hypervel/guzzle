@@ -567,9 +567,14 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
 
         // Merge the URI into the base URI.
         $uriIsString = \is_string($uri);
-        $uri = self::createUri($uri, $uriFactory);
+        $uri = self::createUri($uri, $uriFactory, Idn::normalizeConversionOption($options['idn_conversion'] ?? null));
         $builtUri = $this->buildUri($uri, $options);
         if ($uriIsString && $builtUri !== $uri) {
+            // The string form of an invalid host can name another host or port.
+            if (!Psr7\Rfc3986::isValidHost($builtUri->getHost())) {
+                throw new InvalidArgumentException(\sprintf('Invalid host: %s', DiagnosticValue::escape($builtUri->getHost())));
+            }
+
             $builtUri = self::createUri((string) $builtUri, $uriFactory);
         }
 
@@ -744,12 +749,13 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
         #[\SensitiveParameter]
         array $config
     ): UriInterface {
+        $idnOptions = Idn::normalizeConversionOption($config['idn_conversion'] ?? null);
+
         if (isset($config['base_uri'])) {
             $uriFactory = self::requireUriFactory($config[RequestOptions::URI_FACTORY] ?? new HttpFactory());
-            $uri = Psr7\UriResolver::resolve(self::createUri($config['base_uri'], $uriFactory), $uri);
+            $uri = Psr7\UriResolver::resolve(self::createUri($config['base_uri'], $uriFactory, $idnOptions), $uri);
         }
 
-        $idnOptions = Idn::normalizeConversionOption($config['idn_conversion'] ?? null);
         if ($idnOptions !== null) {
             $uri = Idn::convertUri($uri, $idnOptions);
         }
@@ -852,14 +858,22 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
     /**
      * @param mixed $uri
      */
-    private static function createUri($uri, UriFactoryInterface $uriFactory): UriInterface
+    private static function createUri($uri, UriFactoryInterface $uriFactory, ?int $idnOptions = null): UriInterface
     {
         if ($uri instanceof UriInterface) {
             return $uri;
         }
 
         if (\is_string($uri)) {
-            return $uriFactory->createUri($uri);
+            if (\preg_match('%\A[^:/?#]++:[0-9]{1,5}+(?:/|\z)%', $uri) === 1) {
+                \trigger_deprecation(
+                    'guzzlehttp/guzzle',
+                    '8.6',
+                    'Passing a URI that starts with a host and port, such as "example.com:8080", is deprecated and will be rejected in 9.0. Start it with a scheme or with "//".'
+                );
+            }
+
+            return Idn::createUri($uriFactory, $uri, $idnOptions);
         }
 
         throw new InvalidArgumentException(\sprintf('URI must be a string or %s', UriInterface::class));
