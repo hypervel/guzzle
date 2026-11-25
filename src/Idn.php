@@ -58,8 +58,12 @@ final class Idn
     /**
      * @throws InvalidArgumentException
      */
-    public static function convertUri(UriInterface $uri, int $options = 0): UriInterface
-    {
+    public static function convertUri(
+        // Unlike upstream, keep URIs out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        UriInterface $uri,
+        int $options = 0
+    ): UriInterface {
         if ($uri->getHost()) {
             $asciiHost = self::idnToAsci($uri->getHost(), $options, $info);
             if ($asciiHost === false) {

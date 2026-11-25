@@ -13,6 +13,7 @@ use GuzzleHttp\Handler\CurlHandler;
 use GuzzleHttp\Handler\CurlVersion;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Idn;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Multiplexing;
 use GuzzleHttp\Promise\PromiseInterface;
@@ -3481,6 +3482,88 @@ class ClientTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('IDN conversion failed');
         $client->request('GET', 'https://-яндекс.рф/images', ['idn_conversion' => true]);
+    }
+
+    /**
+     * @dataProvider urisInExceptionTraceProvider
+     *
+     * @param array<string, int> $sensitiveArguments
+     */
+    public function testKeepsUrisOutOfExceptionTraces(callable $trigger, array $sensitiveArguments): void
+    {
+        self::assertTraceRedactsArguments($trigger, $sensitiveArguments);
+    }
+
+    public static function urisInExceptionTraceProvider(): iterable
+    {
+        yield 'deprecated base URI' => [
+            static function (): void {
+                \set_error_handler(static function (int $level, string $message): bool {
+                    throw new \ErrorException($message, 0, $level);
+                }, \E_USER_DEPRECATED);
+
+                try {
+                    new Client(['handler' => new MockHandler(), 'base_uri' => 'example.com:8080/?token=secret']);
+                } finally {
+                    \restore_error_handler();
+                }
+            },
+            [Client::class.'::createUri' => 0],
+        ];
+        yield 'base URI resolved for the transfer' => [
+            static function (): void {
+                $client = new Client([
+                    'handler' => static function (): void {
+                        throw new \RuntimeException('Transfer failed');
+                    },
+                    'base_uri' => 'https://user:secret@example.com/',
+                ]);
+                $client->request('GET', '/images');
+            },
+            [Client::class.'::requestAsync' => 1],
+        ];
+    }
+
+    /**
+     * @requires function idn_to_ascii
+     */
+    public function testKeepsUrisOutOfIdnConversionTraces(): void
+    {
+        $client = new Client(['handler' => new MockHandler([new Response()]), 'base_uri' => 'https://user:secret@-яндекс.рф/']);
+
+        self::assertTraceRedactsArguments(static function () use ($client): void {
+            $client->request('GET', '/images', ['idn_conversion' => true]);
+        }, [Idn::class.'::convertUri' => 0, Client::class.'::buildUri' => 0]);
+    }
+
+    /**
+     * @param array<string, int> $sensitiveArguments
+     */
+    private static function assertTraceRedactsArguments(callable $trigger, array $sensitiveArguments): void
+    {
+        $trace = null;
+        $previous = \ini_set('zend.exception_ignore_args', '0');
+
+        try {
+            $trigger();
+        } catch (\Exception $e) {
+            $trace = $e->getTrace();
+        } finally {
+            \ini_set('zend.exception_ignore_args', $previous);
+        }
+
+        self::assertNotNull($trace, 'Expected an exception');
+
+        $redacted = [];
+        foreach ($trace as $frame) {
+            $function = ($frame['class'] ?? '').'::'.$frame['function'];
+            if (isset($sensitiveArguments[$function])) {
+                self::assertInstanceOf(\SensitiveParameterValue::class, $frame['args'][$sensitiveArguments[$function]]);
+                $redacted[] = $function;
+            }
+        }
+
+        self::assertSame(\array_keys($sensitiveArguments), $redacted);
     }
 
     /**

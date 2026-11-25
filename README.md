@@ -58,7 +58,8 @@ Guzzle client, including clients that SDKs create. This fork adds:
   50. See [Idle cURL Handles](docs/handlers.md#idle-curl-handles).
 - **Fixes not in upstream.** Setting a cookie the jar already holds also removes
   stored cookies that were changed into duplicates of it. Response header
-  parsing keeps headers out of exception traces, as they can carry credentials.
+  parsing, request URI building and IDN conversion keep their header and URI
+  arguments out of exception traces, as these can carry credentials.
 
 > [!IMPORTANT]
 > This fork keeps upstream's public API. Once installed, it replaces

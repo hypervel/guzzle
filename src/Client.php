@@ -545,6 +545,8 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
      */
     public function requestAsync(
         string $method,
+        // Unlike upstream, keep URIs out of traces as they can carry credentials
+        #[\SensitiveParameter]
         $uri = '',
         #[\SensitiveParameter]
         array $options = []
@@ -745,6 +747,8 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
     }
 
     private function buildUri(
+        // Unlike upstream, keep URIs out of traces as they can carry credentials
+        #[\SensitiveParameter]
         UriInterface $uri,
         #[\SensitiveParameter]
         array $config
@@ -858,8 +862,13 @@ class Client implements ClientInterface, \Psr\Http\Client\ClientInterface
     /**
      * @param mixed $uri
      */
-    private static function createUri($uri, UriFactoryInterface $uriFactory, ?int $idnOptions = null): UriInterface
-    {
+    private static function createUri(
+        // Unlike upstream, keep URIs out of traces as they can carry credentials
+        #[\SensitiveParameter]
+        $uri,
+        UriFactoryInterface $uriFactory,
+        ?int $idnOptions = null
+    ): UriInterface {
         if ($uri instanceof UriInterface) {
             return $uri;
         }
