@@ -463,6 +463,34 @@ class CurlFactoryTest extends TestCase
         }
     }
 
+    public function testAllowsSslOptionsCurlOptionOnFixedCurlVersion(): void
+    {
+        $factory = new CurlFactory(1);
+        $easy = self::createOnFactory($factory, '7.83.1', Server::$url, [
+            'curl' => [
+                \CURLOPT_SSL_OPTIONS => \CURLSSLOPT_ALLOW_BEAST,
+            ],
+        ]);
+
+        try {
+            self::assertSame(\CURLSSLOPT_ALLOW_BEAST, $_SERVER['_curl'][\CURLOPT_SSL_OPTIONS]);
+        } finally {
+            $factory->release($easy);
+        }
+    }
+
+    public function testRejectsSslOptionsCurlOptionOnAffectedCurlVersion(): void
+    {
+        $this->expectException(RequestException::class);
+        $this->expectExceptionMessage('The CURLOPT_SSL_OPTIONS cURL option requires libcurl 7.83.1 or newer.');
+
+        self::createOnFactory(new CurlFactory(1), '7.83.0', Server::$url, [
+            'curl' => [
+                \CURLOPT_SSL_OPTIONS => \CURLSSLOPT_ALLOW_BEAST,
+            ],
+        ]);
+    }
+
     public function testRejectsCurlProxyHeaderEntriesContainingNewlines(): void
     {
         $proxyHeaderOption = self::proxyHeaderOption();
@@ -617,6 +645,65 @@ class CurlFactoryTest extends TestCase
         self::assertSame(['Accept: application/json'], $conf[\CURLOPT_HTTPHEADER]);
     }
 
+    /**
+     * @dataProvider headerFieldWithNulProvider
+     */
+    public function testRejectsAHeaderFieldWithANulByteFromACustomRequest(string $name, string $value): void
+    {
+        $factory = new CurlFactory(3);
+
+        $this->expectException(RequestException::class);
+        $this->expectExceptionMessage('Request header fields must not contain a NUL byte.');
+
+        $factory->create(self::requestWithUnvalidatedHeader($name, $value), []);
+    }
+
+    public static function headerFieldWithNulProvider(): iterable
+    {
+        yield 'name with nul' => ["X-Foo\0", 'bar'];
+        yield 'value with nul' => ['X-Foo', "bar\0baz"];
+    }
+
+    /**
+     * @dataProvider invalidHeaderNameProvider
+     */
+    public function testRejectsAnInvalidHeaderNameFromACustomRequest(string $name): void
+    {
+        $factory = new CurlFactory(3);
+
+        $this->expectException(RequestException::class);
+        $this->expectExceptionMessage('Request header names must be valid HTTP tokens.');
+
+        $factory->create(self::requestWithUnvalidatedHeader($name, 'bar'), []);
+    }
+
+    public static function invalidHeaderNameProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'colon' => ['Content-Length:'];
+        yield 'colon and value' => ['X-Other: value; X-Rest'];
+        yield 'trailing space' => ['Content-Length '];
+    }
+
+    /**
+     * @dataProvider headerFieldWithLineBreakProvider
+     */
+    public function testRejectsAHeaderFieldWithALineBreakFromACustomRequestAsACurlHeaderEntry(string $name, string $value): void
+    {
+        $factory = new CurlFactory(3);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('CURLOPT_HTTPHEADER entries must not contain a carriage return or line feed.');
+
+        $factory->create(self::requestWithUnvalidatedHeader($name, $value), []);
+    }
+
+    public static function headerFieldWithLineBreakProvider(): iterable
+    {
+        yield 'name with crlf' => ["X-Foo\r\nX-Injected", 'bar'];
+        yield 'invalid name and value with crlf' => ['X-Other: value; X-Rest', "bar\r\nX-Injected: value"];
+    }
+
     public function testAppliesConfiguredCurlShareHandle(): void
     {
         self::skipIfCurlShareIsUnavailable();
@@ -716,8 +803,7 @@ class CurlFactoryTest extends TestCase
         $option = 999999;
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage((string) $option);
-        $this->expectExceptionMessage('outside the built-in cURL handlers\' allow-list');
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
 
         (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
             'curl' => [
@@ -735,12 +821,29 @@ class CurlFactoryTest extends TestCase
         $option = (int) \constant('CURLOPT_PREREQDATA');
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage((string) $option);
-        $this->expectExceptionMessage('outside the built-in cURL handlers\' allow-list');
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
 
         (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
             'curl' => [
                 $option => true,
+            ],
+        ]);
+    }
+
+    public function testRejectsProxySslOptionsCurlOption(): void
+    {
+        if (!\defined('CURLOPT_PROXY_SSL_OPTIONS')) {
+            self::markTestSkipped('CURLOPT_PROXY_SSL_OPTIONS is not available.');
+        }
+
+        $option = (int) \constant('CURLOPT_PROXY_SSL_OPTIONS');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
+
+        (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
+            'curl' => [
+                $option => \CURLSSLOPT_ALLOW_BEAST,
             ],
         ]);
     }
@@ -1025,8 +1128,7 @@ class CurlFactoryTest extends TestCase
         $req = new Psr7\Request('GET', Server::$url);
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('CURLOPT_HTTP_VERSION');
-        $this->expectExceptionMessage('request protocol version');
+        $this->expectExceptionMessageMatches('/CURLOPT_HTTP_VERSION\b.*request protocol version/');
 
         $a($req, ['curl' => [\CURLOPT_HTTP_VERSION => \CURL_HTTP_VERSION_1_0]]);
     }
@@ -1082,8 +1184,7 @@ class CurlFactoryTest extends TestCase
 
         try {
             $this->expectException(\InvalidArgumentException::class);
-            $this->expectExceptionMessage('CURLOPT_SHARE');
-            $this->expectExceptionMessage('transport_sharing');
+            $this->expectExceptionMessageMatches('/CURLOPT_SHARE\b.*transport_sharing/');
 
             (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
                 'curl' => [
@@ -1789,7 +1890,9 @@ class CurlFactoryTest extends TestCase
     {
         return [
             ['http://proxy.example.com:3128'],
+            ['http://proxy.example.com.:3128'],
             ['127.0.0.1:8125'],
+            ['http://.:secret@proxy.example.com:3128'],
             ['socks5://proxy.example.com:1080'],
         ];
     }
@@ -1999,6 +2102,10 @@ class CurlFactoryTest extends TestCase
     {
         return [
             ['http://exa mple.com:3128'],          // space in host
+            ['http://user:se@other.example:8080@proxy.example.com:3128'], // another host after the first at sign
+            ['http://.'],                          // dot host
+            ['http://user:secret@.:3128'],         // dot host with a port
+            ['http://./'],                         // dot host with a slash
             ['http://127.0.0.1:99999999'],         // port out of range
             ['127.0.0.1:99999999'],                // scheme-less, port out of range
             ["\u{00A0}https://proxy.example.com:3128"], // leading junk before the scheme
@@ -2017,6 +2124,72 @@ class CurlFactoryTest extends TestCase
 
         $f = new CurlFactory(3);
         $f->create(new Psr7\Request('GET', 'https://example.com'), ['proxy' => $proxy]);
+    }
+
+    public static function undecodableProxyCredentialsProvider(): iterable
+    {
+        yield 'password' => ['http://user:secret%0A@proxy.example.com:3128'];
+        yield 'username' => ['socks5://user%00:secret@proxy.example.com:1080'];
+        yield 'lowercase hex, scheme-less' => ['user:secret%1f@proxy.example.com:3128'];
+        yield 'proxy array' => [['https' => 'http://user:secret%0A@proxy.example.com:3128']];
+    }
+
+    /**
+     * @dataProvider undecodableProxyCredentialsProvider
+     *
+     * @param string|array $proxy
+     */
+    public function testRejectsProxyCredentialsWithEncodedControlCharacters($proxy): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Proxy credentials must not contain percent-encoded control characters.');
+
+        $f = new CurlFactory(3);
+        $f->create(new Psr7\Request('GET', 'https://example.com'), ['proxy' => $proxy]);
+    }
+
+    public function testRejectsEnvironmentProxyCredentialsWithEncodedControlCharacters(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Proxy credentials must not contain percent-encoded control characters.');
+
+        self::withProxyEnvironment(['https_proxy' => 'http://user:secret%0A@proxy.example.com:3128'], static function (): void {
+            $f = new CurlFactory(3);
+            $f->create(new Psr7\Request('GET', 'https://example.com'), []);
+        });
+    }
+
+    public static function decodableProxyCredentialsProvider(): iterable
+    {
+        yield 'space' => ['http://user:sec%20ret@proxy.example.com:3128'];
+        yield 'delete' => ['http://user:secret%7F@proxy.example.com:3128'];
+        yield 'incomplete escape' => ['http://user:secret%1@proxy.example.com:3128'];
+        yield 'encoded percent sign' => ['http://user:secret%250A@proxy.example.com:3128'];
+    }
+
+    /**
+     * @dataProvider decodableProxyCredentialsProvider
+     */
+    public function testAllowsOtherPercentEncodedProxyCredentials(string $proxy): void
+    {
+        $f = new CurlFactory(3);
+        $f->create(new Psr7\Request('GET', 'https://example.com'), ['proxy' => $proxy]);
+
+        self::assertSame($proxy, $_SERVER['_curl'][\CURLOPT_PROXY]);
+    }
+
+    public function testDoesNotRejectBypassedProxyCredentialsWithEncodedControlCharacters(): void
+    {
+        $f = new CurlFactory(3);
+        $f->create(new Psr7\Request('GET', 'https://example.com'), [
+            'proxy' => [
+                'https' => 'http://user:secret%0A@proxy.example.com:3128',
+                'no' => ['example.com'],
+            ],
+        ]);
+
+        self::assertSame('', $_SERVER['_curl'][\CURLOPT_PROXY]);
+        self::assertSame('*', $_SERVER['_curl'][\CURLOPT_NOPROXY]);
     }
 
     public function testAcceptsSchemeLessProxyWithCredentials(): void
@@ -2047,6 +2220,44 @@ class CurlFactoryTest extends TestCase
 
         self::assertStringNotContainsString("se\x01cr\x7Fet", $redacted);
         self::assertSame('Failed to connect via http://***@proxy.example.com:8125', $redacted);
+    }
+
+    /**
+     * @dataProvider proxyCredentialsCutOffByCurlProvider
+     */
+    public function testRedactsProxyCredentialsCutOffByCurl(string $proxy, string $expected): void
+    {
+        $redacted = self::redactProxyUserInfo(\substr("Unsupported proxy syntax in '".$proxy."'", 0, 255), $proxy);
+
+        self::assertSame("Unsupported proxy syntax in '".$expected, $redacted);
+    }
+
+    public static function proxyCredentialsCutOffByCurlProvider(): iterable
+    {
+        yield 'inside a password with an at sign' => ['http://user:x@'.\str_repeat('s', 300).'@proxy.example.com:99999', 'http://***'];
+        yield 'after a password that ends like the user name' => ['http://user:'.\str_repeat('s', 210).'user@proxy.example.com:8125', 'http://***'];
+        yield 'after the userinfo when it ends like it begins' => ['http://user:x@'.\str_repeat('s', 205).'user:x@proxy.example.com:8125', 'http://***@'];
+        yield 'without a scheme' => ['user:'.\str_repeat('s', 300).'@proxy.example.com:8125', '***'];
+    }
+
+    /**
+     * @dataProvider proxyCredentialsNamedAsHostByCurlProvider
+     */
+    public function testRedactsProxyCredentialsNamedAsHostByCurl(string $proxy, string $error, string $expected): void
+    {
+        self::assertSame($expected, self::redactProxyUserInfo($error, $proxy));
+    }
+
+    public static function proxyCredentialsNamedAsHostByCurlProvider(): iterable
+    {
+        yield 'after the first at sign' => ['http://user:se@pro@proxy.example.com:8125', 'Could not resolve proxy: pro@proxy.example.com', 'Could not resolve proxy: ***@proxy.example.com'];
+        yield 'after the first of three at signs' => ['http://user:s@cr@et@proxy.example.com:8125', 'Could not resolve proxy: cr@et@proxy.example.com', 'Could not resolve proxy: ***@proxy.example.com'];
+        yield 'percent-encoded' => ['http://user:se@cr%2565t@proxy.example.com:8125', 'Could not resolve proxy: cr%2565t@proxy.example.com', 'Could not resolve proxy: ***@proxy.example.com'];
+        yield 'percent-decoded' => ['http://user:se@cr%2565t@proxy.example.com:8125', 'Could not resolve proxy: cr%65t@proxy.example.com', 'Could not resolve proxy: ***@proxy.example.com'];
+        yield 'percent-decoded twice' => ['http://user:se@cr%2565t@proxy.example.com:8125', 'Could not resolve proxy: cret@proxy.example.com', 'Could not resolve proxy: ***@proxy.example.com'];
+        yield 'not in an error that has the whole proxy' => ['user:se@cret@proxy.example.com:8125', "Unsupported proxy syntax in 'user:se@cret@proxy.example.com:8125'", "Unsupported proxy syntax in '***@proxy.example.com:8125'"];
+        yield 'not in an error that has another URL' => ['http://user:se@cret@proxy.example.com:8125', 'Failed for http://user:se%40cret@example.com/', 'Failed for http://user:se%40cret@example.com/'];
+        yield 'not without anything after the at sign' => ['http://user:secret@@proxy.example.com:8125', 'Could not resolve proxy: @proxy.example.com', 'Could not resolve proxy: @proxy.example.com'];
     }
 
     public function testEscapesCurlErrorsAfterRedactionWithoutChangingTimeoutClassification(): void
@@ -5225,6 +5436,54 @@ class CurlFactoryTest extends TestCase
         }
     }
 
+    /**
+     * @dataProvider invalidMethodProvider
+     */
+    public function testRejectsInvalidMethod(string $method): void
+    {
+        $factory = new CurlFactory(3);
+        $request = self::requestWithMethod($method);
+
+        try {
+            $factory->create($request, []);
+            self::fail('Expected request exception.');
+        } catch (RequestException $e) {
+            self::assertSame($request, $e->getRequest());
+            self::assertNotInstanceOf(ResponseException::class, $e);
+            self::assertSame('HTTP method must be a valid HTTP token.', $e->getMessage());
+        }
+    }
+
+    public static function invalidMethodProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'crlf' => ["GET /other HTTP/1.1\r\nX-Injected: value\r\nX-Ignored:"];
+        yield 'line feed' => ["GET\n"];
+        yield 'carriage return' => ["GET\r/other"];
+        yield 'line feed and nul' => ["GE\0T\n"];
+        yield 'slash' => ['GET/other'];
+        yield 'space' => ['GET x'];
+    }
+
+    public function testRejectsMethodWithNulWhenSettingTheCurlOption(): void
+    {
+        $factory = new CurlFactory(3);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Unable to set cURL option CURLOPT_CUSTOMREQUEST');
+
+        $factory->create(self::requestWithMethod("GE\0T"), []);
+    }
+
+    public function testSendsMethodWithEveryTokenCharacter(): void
+    {
+        $factory = new CurlFactory(3);
+
+        $factory->create(self::requestWithMethod("aZ09!#$%&'*+-.^_`|~"), []);
+
+        self::assertSame("aZ09!#$%&'*+-.^_`|~", $_SERVER['_curl'][\CURLOPT_CUSTOMREQUEST]);
+    }
+
     public function testThrowsWhenHttp2IsUnsupported(): void
     {
         $previousVersionInfo = self::setCurlVersionInfo([
@@ -5753,6 +6012,21 @@ class CurlFactoryTest extends TestCase
         self::assertEquals(3, $sent->getHeaderLine('Content-Length'));
         self::assertFalse($sent->hasHeader('Transfer-Encoding'));
         self::assertEquals('foo', (string) $sent->getBody());
+    }
+
+    public function testRemovesContentLengthCaseVariantsFromCustomRequest(): void
+    {
+        $factory = new CurlFactory(3);
+        $request = new class('PUT', Server::$url, ['Content-Length' => '3'], 'foo') extends Psr7\Request {
+            public function getHeaders(): array
+            {
+                return parent::getHeaders() + ['CONTENT-LENGTH' => ['1']];
+            }
+        };
+
+        $factory->create($request, []);
+
+        self::assertNotContains('CONTENT-LENGTH: 1', $_SERVER['_curl'][\CURLOPT_HTTPHEADER]);
     }
 
     public function testSendsPostWithNoBodyOrDefaultContentType(): void
@@ -10527,6 +10801,26 @@ class CurlFactoryTest extends TestCase
         return $readShareHandle($factory);
     }
 
+    private static function requestWithMethod(string $method): RequestInterface
+    {
+        return new class($method) extends Psr7\Request {
+            /** @var string */
+            private $unvalidatedMethod;
+
+            public function __construct(string $method)
+            {
+                parent::__construct('GET', Server::$url);
+
+                $this->unvalidatedMethod = $method;
+            }
+
+            public function getMethod(): string
+            {
+                return $this->unvalidatedMethod;
+            }
+        };
+    }
+
     private static function requestWithProtocolVersion(string $protocolVersion): RequestInterface
     {
         return new class($protocolVersion) extends Psr7\Request {
@@ -10555,6 +10849,26 @@ class CurlFactoryTest extends TestCase
                 $new->protocolVersion = $version;
 
                 return $new;
+            }
+        };
+    }
+
+    private static function requestWithUnvalidatedHeader(string $name, string $value): RequestInterface
+    {
+        return new class($name, $value) extends Psr7\Request {
+            /** @var array<string, string[]> */
+            private $unvalidatedHeaders;
+
+            public function __construct(string $name, string $value)
+            {
+                parent::__construct('GET', Server::$url);
+
+                $this->unvalidatedHeaders = [$name => [$value]];
+            }
+
+            public function getHeaders(): array
+            {
+                return parent::getHeaders() + $this->unvalidatedHeaders;
             }
         };
     }

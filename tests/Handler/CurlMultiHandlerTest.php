@@ -282,6 +282,67 @@ class CurlMultiHandlerTest extends TestCase
         }
     }
 
+    public function testSynchronousWaitInterruptedByThrowableCancelsTheTransfer(): void
+    {
+        Server::flush();
+
+        $handler = new CurlMultiHandler();
+        $target = $handler(new Request('GET', Server::$url.'guzzle-server/read-timeout'), []);
+        $failure = new \RuntimeException('Interrupted.');
+
+        try {
+            self::driveUntilActiveTransferCount($handler, 1);
+
+            P\Utils::queue()->add(static function () use ($failure): void {
+                throw $failure;
+            });
+
+            try {
+                $target->wait();
+                self::fail('Expected the interrupting throwable.');
+            } catch (\RuntimeException $e) {
+                self::assertSame($failure, $e);
+            }
+
+            self::assertTrue(P\State::isRejected($target));
+            self::assertSame([], self::readMultiProperty($handler, 'handles'));
+        } finally {
+            $handler->close();
+            Server::flush();
+        }
+    }
+
+    public function testSynchronousWaitInterruptedByThrowableNeverSendsADelayedRequest(): void
+    {
+        Server::flush();
+        Server::enqueue([new Response(200)]);
+
+        $handler = new CurlMultiHandler();
+        $target = $handler(new Request('GET', Server::$url), ['delay' => 100]);
+        $failure = new \RuntimeException('Interrupted.');
+
+        P\Utils::queue()->add(static function () use ($failure): void {
+            throw $failure;
+        });
+
+        try {
+            try {
+                $target->wait();
+                self::fail('Expected the interrupting throwable.');
+            } catch (\RuntimeException $e) {
+                // PHPUnit's fail() also throws a RuntimeException.
+                self::assertSame($failure, $e);
+            }
+
+            $handler->execute();
+
+            self::assertSame([], Server::received());
+        } finally {
+            $handler->close();
+            Server::flush();
+        }
+    }
+
     public function testDelayedSynchronousWaitIsNotBoundToSiblingSelectTimeout(): void
     {
         Server::flush();
@@ -2034,6 +2095,19 @@ class CurlMultiHandlerTest extends TestCase
         $handler->__destruct();
 
         self::assertTrue(P\State::isPending($promise));
+    }
+
+    public function testWaitAfterDestructorRejectsPendingPromise(): void
+    {
+        $handler = new CurlMultiHandler();
+        $promise = $handler(new Request('GET', Server::$url), ['delay' => 10000]);
+
+        $handler->__destruct();
+
+        $this->expectException(HandlerClosedException::class);
+        $this->expectExceptionMessage('The cURL multi handler was closed before the transfer completed.');
+
+        $promise->wait();
     }
 
     public function testClosePreventsReuse(): void

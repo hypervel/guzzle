@@ -609,6 +609,7 @@ defined by the installed PHP cURL extension:
 - `CURLOPT_RESOLVE`
 - `CURLOPT_SSL_CIPHER_LIST`
 - `CURLOPT_SSL_EC_CURVES`
+- `CURLOPT_SSL_OPTIONS`
 - `CURLOPT_TCP_FASTOPEN`
 - `CURLOPT_TCP_KEEPALIVE`
 - `CURLOPT_TCP_KEEPIDLE`
@@ -636,6 +637,16 @@ refused, or after a reused connection turns out to be dead. When PHP exposes
 at most three native replays; a non-seekable body or a fourth replay fails
 the transfer. The body stream can therefore be read and transmitted more than
 once even though `on_stats` fires only once for the native transfer.
+
+`CURLOPT_SSL_OPTIONS` requires libcurl 7.83.1 or newer, the first release that
+compares SSL options when deciding whether a connection or a TLS session can be
+reused (CVE-2022-27782); on older libcurl the request is rejected up front with
+a `RequestException`. On libcurl 7.87.0 to 8.17.0 built with OpenSSL,
+`CURLSSLOPT_NO_PARTIALCHAIN` is not applied reliably (CVE-2025-14819), so rely
+on it only with libcurl 8.18.0 or newer. Where libcurl's TLS backend supports
+it, `CURLSSLOPT_NATIVE_CA` makes libcurl trust the operating system's
+certificate store, usually in addition to the CA file or directory configured by
+the `verify` request option.
 
 `CURLOPT_HEADEROPT` is intentionally absent from the allow-list above. Guzzle
 sets it internally to `CURLHEADER_SEPARATE` whenever it configures
@@ -1003,11 +1014,11 @@ Constant
 `GuzzleHttp\RequestOptions::IDN_CONVERSION`
 
 ```php
-$client->request('GET', 'https://яндекс.рф');
+$client->request('GET', 'https://яндекс.рф', ['idn_conversion' => true]);
 // яндекс.рф is translated to xn--d1acpjx3f.xn--p1ai before passing it to the handler
 
 $res = $client->request('GET', 'https://яндекс.рф', ['idn_conversion' => false]);
-// The domain part (яндекс.рф) stays unmodified
+// The domain part (яндекс.рф) stays unmodified, so the built-in handlers reject the request
 ```
 
 Enables/disables IDN support, can also be used for precise control by combining
@@ -1583,11 +1594,12 @@ $client->request('GET', '/', [
 
 > [!NOTE]
 > You can provide proxy URLs that contain a scheme, username, and password. For
-> example, `"http://username:password@192.168.16.1:10"`. A scheme-less value
-> such as `"127.0.0.1:8125"` is treated as an HTTP proxy. Both built-in handlers
-> validate the proxy URL up front and reject a malformed one (an invalid host,
-> an out-of-range port, or leading junk before the scheme) with an
-> `InvalidArgumentException`.
+> example, `"http://username:password@192.168.16.1:10"`. The username and
+> password are percent-decoded, so reserved characters and percent signs in them
+> must be percent-encoded. A scheme-less value such as `"127.0.0.1:8125"` is
+> treated as an HTTP proxy. Both built-in handlers validate the proxy URL up
+> front and reject a malformed one (an invalid host, an out-of-range port, or
+> leading junk before the scheme) with an `InvalidArgumentException`.
 
 ### Handler support
 
@@ -1631,6 +1643,15 @@ requires libcurl 7.54.0 or newer and is rejected up front on older libcurl
 Connection established` reply is suppressed on these tunnels, so `on_headers`
 observes only origin responses and a tunneled transfer failure is classified by
 its transport phase.
+
+The cURL handlers also reject, with an `InvalidArgumentException`, a proxy URL
+that some libcurl releases silently skip or misread: one whose username or
+password contains a percent-encoded control character (`%00` through `%1F`),
+such as the `%0A` left by a secret that ends with a newline, one with more than
+one `@`, and one whose host is `.`. Write an `@` in the credentials as `%40`,
+and pass credentials that really contain a control character, percent-encoded in
+the form `username:password`, as the raw `CURLOPT_PROXYUSERPWD` cURL option
+through the [`curl`](#curl) request option.
 
 ### Proxy environment variables
 
@@ -2013,7 +2034,7 @@ response body resources where practical. Request bodies that already implement
 > gzip/deflate decoding, and should stream the resource rather than buffer it
 > entirely into memory. The full contract is described under *Creating Streams*
 > in the
-> [PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.4/docs/streams-and-decorators.md#creating-streams).
+> [PSR-7 stream documentation](https://github.com/guzzle/psr7/blob/3.6/docs/streams-and-decorators.md#creating-streams).
 > Supply a stream implementation you trust.
 
 ## uri_factory
@@ -2059,13 +2080,15 @@ when redirects are enabled. URI objects implementing
 > clears HTTP auth, and it drops `Referer` whenever the scheme changes
 > (including an `https` to `http` downgrade) and otherwise sends only the origin
 > on cross-origin redirects — all by reading `getScheme()`, `getHost()`, and
-> `getPort()` from the URI built from the `Location` header. A custom URI that
-> misreports those, or whose getters disagree with the address actually dialed,
-> can make a cross-origin redirect look same-origin and leak credentials to the
-> target (the class of issue behind CVE-2022-31042, CVE-2022-31043,
-> CVE-2022-31090, and CVE-2022-31091), or enable SSRF and protocol allow-list
-> bypass. The default `GuzzleHttp\Psr7\Uri` lower-cases and validates the scheme
-> and host and strips default ports; supply a URI implementation you trust.
+> `getPort()` from the URI built from the `Location` header. The built-in
+> handlers reject a URI whose string form contains control characters or names a
+> different scheme, host, or port than those getters report; a custom handler
+> receives it unchecked. A custom URI that misreports those can still make a
+> cross-origin redirect look same-origin and leak credentials to the target (the
+> class of issue behind CVE-2022-31042, CVE-2022-31043, CVE-2022-31090, and
+> CVE-2022-31091), or enable SSRF and protocol allow-list bypass. The default
+> `GuzzleHttp\Psr7\Uri` lower-cases and validates the scheme and host and strips
+> default ports; supply a URI implementation you trust.
 
 ## sink
 

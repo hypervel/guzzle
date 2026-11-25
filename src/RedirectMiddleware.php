@@ -227,13 +227,15 @@ class RedirectMiddleware
             ));
         }
 
-        $uri = self::redirectUri($uriFactory, $request, $response, $protocols);
-        $idnOptions = Idn::normalizeConversionOption($options['idn_conversion'] ?? null);
-        if ($idnOptions !== null) {
-            $uri = Idn::convertUri($uri, $idnOptions);
-        }
+        // A server must not be able to raise the psr7 host deprecation.
+        $scope = new Psr7\ErrorScope(\E_USER_DEPRECATED);
 
-        $modify['uri'] = $uri;
+        $modify['uri'] = $scope->run(static function () use ($uriFactory, $request, $response, $protocols, $options): UriInterface {
+            $uri = self::redirectUri($uriFactory, $request, $response, $protocols);
+            $idnOptions = Idn::normalizeConversionOption($options['idn_conversion'] ?? null);
+
+            return $idnOptions === null ? $uri : Idn::convertUri($uri, $idnOptions);
+        });
 
         // The body only needs to be rewound when the next request reuses it.
         if (!isset($modify['body'])) {
@@ -272,7 +274,13 @@ class RedirectMiddleware
             $modify['remove_headers'][] = 'Cookie';
         }
 
-        return Psr7\Utils::modifyRequest($request, $modify);
+        try {
+            return $scope->run(static function () use ($request, $modify): RequestInterface {
+                return Psr7\Utils::modifyRequest($request, $modify);
+            });
+        } catch (\InvalidArgumentException $e) {
+            throw new BadResponseException(\sprintf('Redirect URI, %s, is invalid.', Psr7\UriRedactor::redactUriStringForMessage($response->getHeaderLine('Location'))), $request, $response, $e);
+        }
     }
 
     private static function isRedirectStatusCode(int $statusCode): bool

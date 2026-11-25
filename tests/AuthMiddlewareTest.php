@@ -7,6 +7,7 @@ namespace GuzzleHttp\Tests;
 use GuzzleHttp\AuthMiddleware;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\InvalidArgumentException;
 use GuzzleHttp\Exception\ResponseException;
 use GuzzleHttp\Exception\ResponseTimeoutException;
@@ -607,6 +608,21 @@ class AuthMiddlewareTest extends TestCase
         ]);
 
         self::assertSame(302, $response->getStatusCode());
+    }
+
+    public function testDigestProbeConnectExceptionPassesThrough(): void
+    {
+        $exception = new ConnectException('connection failed', new Request('GET', 'http://example.com'));
+        $mock = new MockHandler([$exception]);
+        $client = new Client(['handler' => self::handlerWithAuth($mock)]);
+
+        try {
+            $client->get('http://example.com', ['auth' => ['a', 'b', 'digest']]);
+
+            self::fail('Expected ConnectException.');
+        } catch (ConnectException $e) {
+            self::assertSame($exception, $e);
+        }
     }
 
     public function testDigestProbeOmitsBodyThroughDefaultStack(): void
@@ -1287,6 +1303,45 @@ class AuthMiddlewareTest extends TestCase
                 self::assertSame($previous, $e->getPrevious());
                 self::assertSame('partial', \file_get_contents($sink));
                 self::assertSame('partial', (string) $e->getResponse()->getBody());
+            }
+        } finally {
+            if (\file_exists($sink)) {
+                \unlink($sink);
+            }
+        }
+    }
+
+    public function testDigestRestoresOriginalSinkOnRetryResponseException(): void
+    {
+        $sink = \tempnam(\sys_get_temp_dir(), 'guzzle-auth-sink');
+        self::assertIsString($sink);
+
+        try {
+            $mock = new MockHandler([
+                new Response(401, ['WWW-Authenticate' => 'Digest realm="test", nonce="abc", qop="auth"'], 'challenge'),
+                static function (RequestInterface $request): ResponseException {
+                    return new ResponseException(
+                        'response failed',
+                        $request,
+                        new Response(500, [], 'failed')
+                    );
+                },
+            ]);
+            $client = new Client(['handler' => self::handlerWithAuth($mock)]);
+
+            try {
+                $client->get('http://example.com', [
+                    'auth' => ['a', 'b', 'digest'],
+                    'sink' => $sink,
+                ]);
+
+                self::fail('Expected ResponseException.');
+            } catch (ResponseException $e) {
+                self::assertSame('response failed', $e->getMessage());
+                self::assertStringStartsWith('Digest ', $e->getRequest()->getHeaderLine('Authorization'));
+                self::assertSame(500, $e->getResponse()->getStatusCode());
+                self::assertSame('failed', \file_get_contents($sink));
+                self::assertSame('failed', (string) $e->getResponse()->getBody());
             }
         } finally {
             if (\file_exists($sink)) {
@@ -2094,6 +2149,34 @@ class AuthMiddlewareTest extends TestCase
 
         self::assertCount(3, $requests);
         self::assertStringContainsString('nc=00000002', $requests[2]->getHeaderLine('Authorization'));
+    }
+
+    public function testDigestDomainWithNonAsciiHostDoesNotRaiseDeprecations(): void
+    {
+        $challengeHeaders = ['WWW-Authenticate' => 'Digest realm="test", nonce="abc", qop="auth", domain="http://яндекс.рф/api http://example.com/api"'];
+        $mock = new MockHandler([
+            new Response(401, $challengeHeaders),
+            new Response(200),
+            new Response(200),
+        ]);
+        $client = new Client(['handler' => self::handlerWithAuth($mock)]);
+
+        $deprecations = [];
+        \set_error_handler(static function (int $level, string $message) use (&$deprecations): bool {
+            $deprecations[] = $message;
+
+            return true;
+        }, \E_USER_DEPRECATED);
+
+        try {
+            $client->get('http://example.com/api/one', ['auth' => ['a', 'b', 'digest']]);
+            $client->get('http://example.com/api/two', ['auth' => ['a', 'b', 'digest']]);
+        } finally {
+            \restore_error_handler();
+        }
+
+        self::assertTrue($mock->getLastRequest()->hasHeader('Authorization'));
+        self::assertSame([], $deprecations);
     }
 
     /**

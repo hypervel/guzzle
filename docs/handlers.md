@@ -181,8 +181,9 @@ handler and handler stack for future requests.
 
 If `CurlMultiHandler::close()` is called while transfers are pending, those
 promises are rejected with `GuzzleHttp\Exception\HandlerClosedException`.
-Destructors perform best-effort cleanup and do not reject pending promises.
-Explicit `close()` calls may throw if native cleanup fails.
+Destructors perform best-effort cleanup and do not reject pending promises;
+waiting on one afterwards rejects it with the same exception. Explicit
+`close()` calls may throw if native cleanup fails.
 
 `Client` and `HandlerStack` do not expose `close()`. Keep a reference to the
 cURL handler if your application needs deterministic cleanup. Closing a cURL
@@ -638,7 +639,7 @@ promise task queue is drained while that scheduler is running.
 > callbacks, in that coroutine. The scheduler pattern below works when the
 > handler, its promises and the queue stay in one execution context, including
 > code outside Swoole coroutines. See
-> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.1/docs/promise-api.md#coroutine-ownership)
+> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.2.0.1/docs/promise-api.md#coroutine-ownership)
 > in `hypervel/guzzle-promises`.
 
 After resolving or rejecting a Guzzle promise from an external scheduler,

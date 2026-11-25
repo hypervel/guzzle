@@ -30,7 +30,7 @@ curl -sS https://getcomposer.org/installer | php
 You can add Guzzle as a dependency using Composer:
 
 ```bash
-composer require hypervel/guzzle:^8.5
+composer require hypervel/guzzle:^8.6
 ```
 
 Alternatively, you can specify Guzzle as a dependency in your project's existing
@@ -39,7 +39,7 @@ composer.json file:
 ```js
 {
   "require": {
-     "hypervel/guzzle": "^8.5"
+     "hypervel/guzzle": "^8.6"
   }
 }
 ```

@@ -378,12 +378,21 @@ final class CurlMultiHandler
                 ++$this->activeCalls;
 
                 try {
+                    if ($this->closed) {
+                        // A destructor closes without rejecting what it drops.
+                        throw new HandlerClosedException('The cURL multi handler was closed before the transfer completed.', $easy->request);
+                    }
+
                     // Waiting cannot drive native cURL while a callback has
                     // the multi handle busy; fail the wait promptly instead
                     // of self-deadlocking.
-                    $stalled = $this->multiExecDepth > 0
-                        ? $this->failNestedWait($id, $waitToken)
-                        : $this->executeUntil($id, $waitToken);
+                    try {
+                        $stalled = $this->multiExecDepth > 0
+                            ? $this->failNestedWait($id, $waitToken)
+                            : $this->executeUntil($id, $waitToken);
+                    } catch (\Throwable $e) {
+                        throw $this->discardInterruptedRequest($id, $waitToken, $e);
+                    }
 
                     // Settling can be queued, and guzzlehttp/promises drains
                     // the queue before deciding a wait function achieved
@@ -410,16 +419,6 @@ final class CurlMultiHandler
                         : new RequestException($message, $easy->request);
 
                     $promise->reject($failure);
-                } catch (\Throwable $e) {
-                    // The promise is rejected with this failure, so its
-                    // transfer must not keep running unobserved.
-                    try {
-                        $this->cancel($id, $waitToken);
-                    } catch (\Throwable $cleanupFailure) {
-                        // Preserve the original failure.
-                    }
-
-                    throw $e;
                 } finally {
                     --$this->activeCalls;
                     $this->notifyIdle();
@@ -1549,6 +1548,20 @@ final class CurlMultiHandler
         return $stalled;
     }
 
+    /**
+     * Cancels a request whose wait threw, since that rejects its promise.
+     */
+    private function discardInterruptedRequest(int $id, object $waitToken, \Throwable $failure): \Throwable
+    {
+        try {
+            $this->cancel($id, $waitToken);
+        } catch (\Throwable $e) {
+            // Preserve the original failure.
+        }
+
+        return $failure;
+    }
+
     private function disposeEasyHandle(
         #[\SensitiveParameter]
         EasyHandle $easy
@@ -1864,9 +1877,6 @@ final class CurlMultiHandler
         $this->assertOpen();
 
         $multiHandle = \curl_multi_init();
-        if (false === $multiHandle) {
-            throw new \RuntimeException('Can not initialize curl multi handle.');
-        }
 
         try {
             foreach ($this->options as $option => $value) {
