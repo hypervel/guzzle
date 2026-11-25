@@ -319,9 +319,10 @@ class CurlMultiHandlerTest extends TestCase
 
         $handler = new CurlMultiHandler();
         $target = $handler(new Request('GET', Server::$url), ['delay' => 100]);
+        $failure = new \RuntimeException('Interrupted.');
 
-        P\Utils::queue()->add(static function (): void {
-            throw new \RuntimeException('Interrupted.');
+        P\Utils::queue()->add(static function () use ($failure): void {
+            throw $failure;
         });
 
         try {
@@ -329,6 +330,8 @@ class CurlMultiHandlerTest extends TestCase
                 $target->wait();
                 self::fail('Expected the interrupting throwable.');
             } catch (\RuntimeException $e) {
+                // PHPUnit's fail() also throws a RuntimeException.
+                self::assertSame($failure, $e);
             }
 
             $handler->execute();

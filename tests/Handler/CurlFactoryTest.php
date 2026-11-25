@@ -803,8 +803,7 @@ class CurlFactoryTest extends TestCase
         $option = 999999;
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage((string) $option);
-        $this->expectExceptionMessage('outside the built-in cURL handlers\' allow-list');
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
 
         (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
             'curl' => [
@@ -822,8 +821,7 @@ class CurlFactoryTest extends TestCase
         $option = (int) \constant('CURLOPT_PREREQDATA');
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage((string) $option);
-        $this->expectExceptionMessage('outside the built-in cURL handlers\' allow-list');
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
 
         (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
             'curl' => [
@@ -841,8 +839,7 @@ class CurlFactoryTest extends TestCase
         $option = (int) \constant('CURLOPT_PROXY_SSL_OPTIONS');
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage((string) $option);
-        $this->expectExceptionMessage('outside the built-in cURL handlers\' allow-list');
+        $this->expectExceptionMessageMatches('/\b'.$option.'\b.* outside the built-in cURL handlers\' allow-list/');
 
         (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
             'curl' => [
@@ -1131,8 +1128,7 @@ class CurlFactoryTest extends TestCase
         $req = new Psr7\Request('GET', Server::$url);
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('CURLOPT_HTTP_VERSION');
-        $this->expectExceptionMessage('request protocol version');
+        $this->expectExceptionMessageMatches('/CURLOPT_HTTP_VERSION\b.*request protocol version/');
 
         $a($req, ['curl' => [\CURLOPT_HTTP_VERSION => \CURL_HTTP_VERSION_1_0]]);
     }
@@ -1188,8 +1184,7 @@ class CurlFactoryTest extends TestCase
 
         try {
             $this->expectException(\InvalidArgumentException::class);
-            $this->expectExceptionMessage('CURLOPT_SHARE');
-            $this->expectExceptionMessage('transport_sharing');
+            $this->expectExceptionMessageMatches('/CURLOPT_SHARE\b.*transport_sharing/');
 
             (new CurlFactory(3))->create(new Psr7\Request('GET', Server::$url), [
                 'curl' => [

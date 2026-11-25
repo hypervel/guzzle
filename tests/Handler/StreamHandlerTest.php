@@ -3602,11 +3602,11 @@ class StreamHandlerTest extends TestCase
     public function testRejectsConflictingStreamContextOptions(string $wrapper, string $option, $value, ?string $replacement): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('stream_context.'.$wrapper.'.'.$option);
-        $this->expectExceptionMessage('conflicts with Guzzle-managed');
+        $pattern = \preg_quote('stream_context.'.$wrapper.'.'.$option, '/').' .*conflicts with Guzzle-managed';
         if ($replacement !== null) {
-            $this->expectExceptionMessage($replacement);
+            $pattern .= '.*'.\preg_quote($replacement, '/');
         }
+        $this->expectExceptionMessageMatches('/'.$pattern.'/');
 
         $this->getSendResult([
             'stream_context' => [
@@ -3996,11 +3996,7 @@ class StreamHandlerTest extends TestCase
     public function testRejectsUnsupportedStreamContextOptions(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('stream_context.http.unknown_option');
-        $this->expectExceptionMessage('stream_context.http.ignore_errors');
-        $this->expectExceptionMessage('stream_context.ssl.SNI_server_name');
-        $this->expectExceptionMessage('stream_context.custom.foo');
-        $this->expectExceptionMessage('stream_context.cus\\x00tom.f\\xFFoo');
+        $this->expectExceptionMessage('Unsupported options: stream_context.http.ignore_errors, stream_context.http.unknown_option, stream_context.ssl.SNI_server_name, stream_context.custom.foo, stream_context.cus\\x00tom.f\\xFFoo.');
 
         $this->getSendResult([
             'stream_context' => [
