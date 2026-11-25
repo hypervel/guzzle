@@ -48,7 +48,10 @@ either output limit is reached.
 > license, and because a copy shipped inside an installed library goes out of
 > date. Use a separate jar for each origin or trust boundary, or extend
 > `CookieJar` and reject such domains in `setCookie()` using a list you keep
-> current.
+> current. Automatic redirects keep using the original request's jar, so a
+> server reached through a redirect can store cookies that later requests send.
+> If you rely on separate jars, disable automatic redirects and follow redirects
+> to another trust boundary yourself, with that boundary's jar.
 
 You can manually set cookies into a cookie jar with the named constructor
 `fromArray(array $cookies, $domain)`.
