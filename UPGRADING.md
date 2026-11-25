@@ -16,7 +16,7 @@ fork.
 This fork requires PHP 8.4 or newer and Swoole 6.3.0 RC2 or a later 6.x release.
 It requires `hypervel/guzzle-promises`, Hypervel's fork of
 `guzzlehttp/promises`, in place of `guzzlehttp/promises`; also read its
-[upgrade guide](https://github.com/hypervel/guzzle-promises/blob/3.1/UPGRADING.md).
+[upgrade guide](https://github.com/hypervel/guzzle-promises/blob/3.2.0.1/UPGRADING.md).
 
 #### Multi Handler Ownership
 
@@ -47,7 +47,7 @@ Promise callbacks settle promises in the coroutine that drains the task queue,
 so coroutine applications must pass `GuzzleHttp\Promise\Utils::queue()` a task
 queue that keeps a separate queue for each coroutine. Hypervel installs one when
 it boots. See
-[Task Queue](https://github.com/hypervel/guzzle-promises/blob/3.1/docs/promise-api.md#task-queue).
+[Task Queue](https://github.com/hypervel/guzzle-promises/blob/3.2.0.1/docs/promise-api.md#task-queue).
 
 #### Idle cURL Handles
 

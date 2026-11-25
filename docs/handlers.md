@@ -639,7 +639,7 @@ promise task queue is drained while that scheduler is running.
 > callbacks, in that coroutine. The scheduler pattern below works when the
 > handler, its promises and the queue stay in one execution context, including
 > code outside Swoole coroutines. See
-> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.1/docs/promise-api.md#coroutine-ownership)
+> [Coroutine Ownership](https://github.com/hypervel/guzzle-promises/blob/3.2.0.1/docs/promise-api.md#coroutine-ownership)
 > in `hypervel/guzzle-promises`.
 
 After resolving or rejecting a Guzzle promise from an external scheduler,
